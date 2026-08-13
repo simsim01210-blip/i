@@ -1,0 +1,73 @@
+plugins {
+    id 'fabric-loom' version "${loom_version}"
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+def compatLayer = project.findProperty('compat_layer') ?: 'legacy'
+def inputLayer = project.findProperty('input_layer') ?: 'legacy'
+
+base {
+    archivesName = project.archives_base_name
+}
+
+loom {
+    accessWidenerPath = file("src/compat/${compatLayer}/resources/planetearth_minimap.accesswidener")
+}
+
+sourceSets {
+    main {
+        java.srcDir "src/compat/${compatLayer}/java"
+        java.srcDir "src/input/${inputLayer}/java"
+        resources.srcDir "src/compat/${compatLayer}/resources"
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    implementation include("com.twelvemonkeys.imageio:imageio-webp:3.10.1")
+    implementation include("com.twelvemonkeys.imageio:imageio-core:3.10.1")
+    implementation include("com.twelvemonkeys.imageio:imageio-metadata:3.10.1")
+    implementation include("com.twelvemonkeys.common:common-lang:3.10.1")
+    implementation include("com.twelvemonkeys.common:common-io:3.10.1")
+    implementation include("com.twelvemonkeys.common:common-image:3.10.1")
+}
+
+processResources {
+    inputs.property 'version', project.version
+    inputs.property 'minecraft_dependency', project.findProperty('minecraft_dependency') ?: "~${project.minecraft_version}"
+    inputs.property 'java_version', project.java_version
+    inputs.property 'loader_version', project.loader_version
+    filesMatching('fabric.mod.json') {
+        expand(
+                'version': project.version,
+                'minecraft_dependency': project.findProperty('minecraft_dependency') ?: "~${project.minecraft_version}",
+                'java_version': project.java_version,
+                'loader_version': project.loader_version
+        )
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = Integer.parseInt(project.java_version)
+}
+
+java {
+    sourceCompatibility = JavaVersion.toVersion(project.java_version)
+    targetCompatibility = JavaVersion.toVersion(project.java_version)
+}
+
+jar {
+    from('LICENSE') {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+}

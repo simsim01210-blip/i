@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "planetearth_minimap",
+  "version": "${version}",
+  "name": "PlanetMap",
+  "description": "A real-time in-game minimap and full-screen map powered by the PlanetEarth web map.",
+  "authors": ["PlanetEarth Minimap contributors"],
+  "contact": {
+    "homepage": "https://map.planetearth.kr/"
+  },
+  "license": "MIT",
+  "icon": "assets/planetearth_minimap/icon.png",
+  "environment": "client",
+  "accessWidener": "planetearth_minimap.accesswidener",
+  "entrypoints": {
+    "client": [
+      "kr.planetearth.minimap.PlanetEarthMinimapClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_dependency}",
+    "java": ">=${java_version}"
+  }
+}
