@@ -1,22 +1,53 @@
-MIT License
+All Rights Reserved
 
-Copyright (c) 2026 PlanetEarth Minimap contributors
+Copyright (c) 2026 lil0ri (PlanetMap)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+이 저장소의 소스 코드와 이를 빌드하여 만든 모드 파일(jar)의 모든 권리는
+저작권자(lil0ri)에게 있습니다.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+허용되는 것:
+  - 개인적, 비상업적 용도로 이 모드를 다운로드하여 마인크래프트에 설치해 사용하는 것
+  - Modrinth 등 저작권자가 직접 배포하는 공식 채널에서 내려받는 것
+
+명시적인 사전 허가 없이는 금지되는 것:
+  - 이 모드(원본 또는 수정본)를 다른 웹사이트, 모드팩, 저장소 등에
+    재배포하거나 재업로드하는 행위
+  - 소스 코드 또는 컴파일된 결과물을 수정, 변형, 2차 저작물로 만들어
+    배포하는 행위
+  - 이 모드 또는 그 일부를 상업적 목적으로 이용하는 행위
+
+재배포, 수정, 2차 배포 등 위에 나열되지 않은 이용을 원하시면 저작권자에게
+먼저 연락하여 서면 허가를 받아야 합니다.
+
+이 소프트웨어는 "있는 그대로" 제공되며, 어떠한 명시적 또는 묵시적 보증도
+하지 않습니다. 이 소프트웨어의 사용으로 인해 발생하는 손해에 대해
+저작권자는 책임을 지지 않습니다.
+
+---
+
+All Rights Reserved
+
+Copyright (c) 2026 lil0ri (PlanetMap)
+
+All rights to the source code in this repository and to the mod file (jar)
+built from it belong to the copyright holder (lil0ri).
+
+Permitted:
+  - Downloading and using this mod in Minecraft for personal, non-commercial
+    play
+  - Downloading it from official channels distributed directly by the
+    copyright holder (e.g. Modrinth)
+
+Prohibited without prior explicit permission:
+  - Redistributing or re-uploading this mod (original or modified) to any
+    other website, modpack, or repository
+  - Modifying, altering, or creating derivative works from the source code
+    or compiled output and distributing them
+  - Using this mod or any part of it for commercial purposes
+
+For redistribution, modification, or any other use not listed above,
+please contact the copyright holder first and obtain written permission.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
+IMPLIED. THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY DAMAGES ARISING
+FROM THE USE OF THIS SOFTWARE.

@@ -8,7 +8,7 @@
   "contact": {
     "homepage": "https://map.planetearth.kr/"
   },
-  "license": "MIT",
+  "license": "LicenseRef-All-Rights-Reserved",
   "icon": "assets/planetearth_minimap/icon.png",
   "environment": "client",
   "accessWidener": "planetearth_minimap.accesswidener",
