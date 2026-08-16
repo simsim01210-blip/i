@@ -219,6 +219,14 @@ public final class LiveAtlasPlayerManager {
         // and worldpvp players never showed up at all.
         String world = LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance());
         if (world == null) {
+            // No map for this dimension at all (Nether, ...), so there is no player
+            // feed for it either — clear the roster instead of leaving it showing
+            // whichever world's players were last fetched, floating at their old,
+            // now-meaningless coordinates on top of the loading indicator.
+            if (!players.isEmpty()) {
+                players = List.of();
+                rosterRevision++;
+            }
             PENDING.set(false);
             return;
         }
