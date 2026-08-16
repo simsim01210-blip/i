@@ -67,7 +67,7 @@ public final class MinimapConfig {
      *  territory, and (on the full map screen only) each site marker's own name next
      *  to its icon — instead of only showing on hover. Shown on the corner minimap and
      *  the overlay map too, not just the full map screen. */
-    public boolean showMapLabels = false;
+    public boolean showMapLabels = true;
     public int showMapLabelScalePercent = 100;
 
     public static MinimapConfig load() {
