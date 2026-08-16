@@ -77,6 +77,12 @@ public final class LiveAtlasMarkerManager {
     private static boolean[] markerOccupancy = new boolean[0];
     private static AreaRenderCache recentAreaCache;
     private static AreaRenderCache previousAreaCache;
+    // Same idea as the area cache, for the minimap/overlay's site markers: recomputing
+    // which markers are in view (a category-by-category, bounded scan) every single
+    // frame was the direct cause of a real reported slowdown once markers started
+    // drawing there too, so it's now only redone when the view pans past the margin.
+    private static MarkerRenderCache recentMarkerCache;
+    private static MarkerRenderCache previousMarkerCache;
     // Reused every frame for PlatformCompat.fillBatch instead of allocating fresh
     // arrays each time — grown, never shrunk.
     private static int[] batchLeft = new int[256];
@@ -217,10 +223,8 @@ public final class LiveAtlasMarkerManager {
                         pixelsPerBlock, CATEGORIES.keySet());
             }
             if (PlanetEarthMinimapClient.config.showSiteMarkers) {
-                // No cursor on the minimap/overlay, so there's nothing to hover — pass
-                // an off-map mouse position to skip that hit-testing entirely.
-                drawSiteMarkers(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
-                        pixelsPerBlock, zoom, CATEGORIES.keySet(), inWorldPvp, -1, -1);
+                drawSiteMarkersCached(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
+                        pixelsPerBlock, zoom, CATEGORIES.keySet(), inWorldPvp);
             }
         } finally {
             context.disableScissor();
@@ -288,6 +292,133 @@ public final class LiveAtlasMarkerManager {
             }
         }
         return hovered;
+    }
+
+    /** Same visual result as {@link #drawSiteMarkers} (icons + optional labels, no
+     *  hover — the minimap/overlay have no cursor), but for the minimap/overlay
+     *  specifically: which markers are in view is cached with an overscanned margin
+     *  and only rebuilt once the view pans past it, the same way {@link #renderAreas}
+     *  already caches territory geometry. Scanning every category from scratch every
+     *  single frame was a real, reported slowdown once markers started drawing on the
+     *  always-on minimap and the (much bigger) overlay map, not just the full map
+     *  screen the underlying scan was originally written for. */
+    private static void drawSiteMarkersCached(DrawContext context, int mapX, int mapY, int width, int height,
+                                              double centerWorldX, double centerWorldZ, double pixelsPerBlock,
+                                              int zoom, Set<String> enabledCategories, boolean inWorldPvp) {
+        int markerSize = displayMarkerSize(zoom);
+        int cacheMargin = areaCacheMargin(width, height);
+        Map<String, MarkerCategory> snapshot = markerData;
+        MarkerRenderCache batch = findMarkerCache(snapshot, enabledCategories,
+                mapX, mapY, width, height, centerWorldX, centerWorldZ, pixelsPerBlock);
+        if (batch == null) {
+            List<MarkerDrawEntry> entries = new ArrayList<>();
+            double halfWorldWidth = (width / 2.0 + cacheMargin) / pixelsPerBlock;
+            double halfWorldHeight = (height / 2.0 + cacheMargin) / pixelsPerBlock;
+            double minWorldX = centerWorldX - halfWorldWidth;
+            double maxWorldX = centerWorldX + halfWorldWidth;
+            double minWorldZ = centerWorldZ - halfWorldHeight;
+            double maxWorldZ = centerWorldZ + halfWorldHeight;
+            for (String category : enabledCategories) {
+                MarkerCategory data = snapshot.get(category);
+                if (data == null) continue;
+                int firstMarker = lowerBoundX(data.markersByX, minWorldX);
+                for (int i = firstMarker; i < data.markersByX.size(); i++) {
+                    MapMarker marker = data.markersByX.get(i);
+                    if (marker.x > maxWorldX) break;
+                    if (marker.z < minWorldZ || marker.z > maxWorldZ) continue;
+                    entries.add(new MarkerDrawEntry(marker.x, marker.z, marker.icon, marker.label));
+                    // Pre-warm icons for the whole overscanned margin, not just the
+                    // exact viewport, so panning to the edge doesn't pop in blank spots.
+                    requestIcon(marker.icon);
+                }
+            }
+            batch = new MarkerRenderCache(snapshot, Set.copyOf(enabledCategories), mapX, mapY,
+                    width, height, centerWorldX, centerWorldZ, pixelsPerBlock, cacheMargin,
+                    List.copyOf(entries));
+            cacheMarkerBatch(batch);
+        }
+
+        int centerX = mapX + width / 2;
+        int centerY = mapY + height / 2;
+        for (MarkerDrawEntry entry : batch.entries) {
+            int x = centerX + (int) Math.round((entry.worldX - centerWorldX) * pixelsPerBlock);
+            int y = centerY + (int) Math.round((entry.worldZ - centerWorldZ) * pixelsPerBlock);
+            if (x < mapX - markerSize || x > mapX + width + markerSize
+                    || y < mapY - markerSize || y > mapY + height + markerSize) continue;
+            drawIcon(context, entry.icon, x, y, markerSize);
+            if (PlanetEarthMinimapClient.config.showMarkerLabels || inWorldPvp) {
+                drawMarkerLabel(context, displayLabel(entry.label, inWorldPvp), x, y, markerSize);
+            }
+        }
+    }
+
+    private static MarkerRenderCache findMarkerCache(
+            Map<String, MarkerCategory> snapshot, Set<String> enabledCategories,
+            int mapX, int mapY, int width, int height,
+            double centerWorldX, double centerWorldZ, double scale) {
+        if (recentMarkerCache != null && recentMarkerCache.matches(snapshot, enabledCategories,
+                mapX, mapY, width, height, centerWorldX, centerWorldZ, scale)) {
+            return recentMarkerCache;
+        }
+        if (previousMarkerCache != null && previousMarkerCache.matches(snapshot, enabledCategories,
+                mapX, mapY, width, height, centerWorldX, centerWorldZ, scale)) {
+            MarkerRenderCache found = previousMarkerCache;
+            previousMarkerCache = recentMarkerCache;
+            recentMarkerCache = found;
+            return found;
+        }
+        return null;
+    }
+
+    private static void cacheMarkerBatch(MarkerRenderCache batch) {
+        previousMarkerCache = recentMarkerCache;
+        recentMarkerCache = batch;
+    }
+
+    private record MarkerDrawEntry(double worldX, double worldZ, String icon, String label) {}
+
+    private static final class MarkerRenderCache {
+        private final Map<String, MarkerCategory> snapshot;
+        private final Set<String> categories;
+        private final int mapX;
+        private final int mapY;
+        private final int width;
+        private final int height;
+        private final double centerWorldX;
+        private final double centerWorldZ;
+        private final long scaleBits;
+        private final int margin;
+        private final List<MarkerDrawEntry> entries;
+
+        private MarkerRenderCache(Map<String, MarkerCategory> snapshot, Set<String> categories,
+                                  int mapX, int mapY, int width, int height,
+                                  double centerWorldX, double centerWorldZ, double scale,
+                                  int margin, List<MarkerDrawEntry> entries) {
+            this.snapshot = snapshot;
+            this.categories = categories;
+            this.mapX = mapX;
+            this.mapY = mapY;
+            this.width = width;
+            this.height = height;
+            this.centerWorldX = centerWorldX;
+            this.centerWorldZ = centerWorldZ;
+            this.scaleBits = Double.doubleToLongBits(scale);
+            this.margin = margin;
+            this.entries = entries;
+        }
+
+        private boolean matches(Map<String, MarkerCategory> snapshot,
+                                Set<String> enabledCategories,
+                                int mapX, int mapY, int width, int height,
+                                double centerWorldX, double centerWorldZ, double scale) {
+            return this.snapshot == snapshot
+                    && this.mapX == mapX && this.mapY == mapY
+                    && this.width == width && this.height == height
+                    && scaleBits == Double.doubleToLongBits(scale)
+                    && Math.abs((this.centerWorldX - centerWorldX) * scale) <= margin - 2
+                    && Math.abs((this.centerWorldZ - centerWorldZ) * scale) <= margin - 2
+                    && categories.equals(enabledCategories);
+        }
     }
 
     private static void renderAreas(DrawContext context, int mapX, int mapY, int width, int height,
