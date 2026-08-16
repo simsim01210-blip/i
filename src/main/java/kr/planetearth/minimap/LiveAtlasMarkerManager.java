@@ -179,55 +179,8 @@ public final class LiveAtlasMarkerManager {
                         pixelsPerBlock, enabledCategories);
             }
             if (PlanetEarthMinimapClient.config.showSiteMarkers) {
-                int markerSize = displayMarkerSize(zoom);
-                int hitRadius = Math.max(4, markerSize / 2);
-                // At world-scale zoom hundreds of icons can land on the same few
-                // pixels. Drawing all of those hidden layers only adds GPU work, so
-                // collapse overlapping screen buckets at the two farthest levels.
-                int markerBucketSize = Math.max(6, markerSize * 3 / 4);
-                int bucketZoom = PlanetEarthMinimapClient.config.lowSpecMode ? 4 : 5;
-                int markerBucketColumns = zoom >= bucketZoom
-                        ? Math.floorDiv(width + markerBucketSize * 2 - 1, markerBucketSize) + 1 : 0;
-                int markerBucketRows = zoom >= bucketZoom
-                        ? Math.floorDiv(height + markerBucketSize * 2 - 1, markerBucketSize) + 1 : 0;
-                int markerBucketCount = markerBucketColumns * markerBucketRows;
-                if (markerBucketCount > 0) {
-                    if (markerOccupancy.length < markerBucketCount) {
-                        markerOccupancy = new boolean[markerBucketCount];
-                    } else {
-                        java.util.Arrays.fill(markerOccupancy, 0, markerBucketCount, false);
-                    }
-                }
-                for (String category : enabledCategories) {
-                    MarkerCategory data = markerData.get(category);
-                    if (data == null) continue;
-                    double minMarkerWorldX = centerWorldX
-                            - (width / 2.0 + markerSize) / pixelsPerBlock;
-                    double maxMarkerWorldX = centerWorldX
-                            + (width / 2.0 + markerSize) / pixelsPerBlock;
-                    int firstMarker = lowerBoundX(data.markersByX, minMarkerWorldX);
-                    for (int markerIndex = firstMarker;
-                         markerIndex < data.markersByX.size(); markerIndex++) {
-                        MapMarker marker = data.markersByX.get(markerIndex);
-                        if (marker.x > maxMarkerWorldX) break;
-                        int x = centerX + (int) Math.round((marker.x - centerWorldX) * pixelsPerBlock);
-                        int y = centerY + (int) Math.round((marker.z - centerWorldZ) * pixelsPerBlock);
-                        if (x < mapX - markerSize || x > mapX + width + markerSize
-                                || y < mapY - markerSize || y > mapY + height + markerSize) continue;
-                        if (markerBucketCount > 0) {
-                            int bucketX = Math.floorDiv(x - mapX + markerBucketSize, markerBucketSize);
-                            int bucketY = Math.floorDiv(y - mapY + markerBucketSize, markerBucketSize);
-                            int bucket = bucketY * markerBucketColumns + bucketX;
-                            if (bucket < 0 || bucket >= markerBucketCount || markerOccupancy[bucket]) continue;
-                            markerOccupancy[bucket] = true;
-                        }
-                        drawIcon(context, marker.icon, x, y, markerSize);
-                        if (PlanetEarthMinimapClient.config.showMarkerLabels || inWorldPvp) {
-                            drawMarkerLabel(context, displayLabel(marker.label, inWorldPvp), x, y, markerSize);
-                        }
-                        if (Math.abs(mouseX - x) <= hitRadius && Math.abs(mouseY - y) <= hitRadius) hovered = marker;
-                    }
-                }
+                hovered = drawSiteMarkers(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
+                        pixelsPerBlock, zoom, enabledCategories, inWorldPvp, mouseX, mouseY);
             }
         } finally {
             context.disableScissor();
@@ -245,12 +198,16 @@ public final class LiveAtlasMarkerManager {
         }
     }
 
-    /** Draws only LiveAtlas area polygons, for the compact HUD minimap. */
+    /** Draws LiveAtlas area polygons and (unlike the old version) site markers too, for
+     *  the compact HUD minimap and the overlay map — those never showed marker icons
+     *  or names at all before, only territory colour. */
     public static void renderAreaOverlay(DrawContext context, int mapX, int mapY,
                                          int width, int height, double centerWorldX,
                                          double centerWorldZ, int zoom) {
         refreshIfNeeded();
         double pixelsPerBlock = 4.0 / (1 << Math.max(0, Math.min(zoom, 7)));
+        boolean inWorldPvp = "worldpvp".equals(
+                LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance()));
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         try {
             renderAreas(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
@@ -259,9 +216,78 @@ public final class LiveAtlasMarkerManager {
                 drawAreaLabels(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
                         pixelsPerBlock, CATEGORIES.keySet());
             }
+            if (PlanetEarthMinimapClient.config.showSiteMarkers) {
+                // No cursor on the minimap/overlay, so there's nothing to hover — pass
+                // an off-map mouse position to skip that hit-testing entirely.
+                drawSiteMarkers(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
+                        pixelsPerBlock, zoom, CATEGORIES.keySet(), inWorldPvp, -1, -1);
+            }
         } finally {
             context.disableScissor();
         }
+    }
+
+    /** Draws every visible site marker's icon (and, if enabled, its persistent label).
+     *  Shared by the full map screen (which also hit-tests the cursor for a hover
+     *  tooltip — pass real mouseX/mouseY) and the minimap/overlay (which have no
+     *  cursor to hover with — pass (-1, -1) to skip that check entirely). Returns
+     *  whichever marker the cursor is over, or null. */
+    private static MapMarker drawSiteMarkers(DrawContext context, int mapX, int mapY, int width, int height,
+                                              double centerWorldX, double centerWorldZ, double pixelsPerBlock,
+                                              int zoom, Set<String> enabledCategories, boolean inWorldPvp,
+                                              int mouseX, int mouseY) {
+        MapMarker hovered = null;
+        int centerX = mapX + width / 2;
+        int centerY = mapY + height / 2;
+        int markerSize = displayMarkerSize(zoom);
+        int hitRadius = Math.max(4, markerSize / 2);
+        // At world-scale zoom hundreds of icons can land on the same few pixels.
+        // Drawing all of those hidden layers only adds GPU work, so collapse
+        // overlapping screen buckets at the two farthest levels.
+        int markerBucketSize = Math.max(6, markerSize * 3 / 4);
+        int bucketZoom = PlanetEarthMinimapClient.config.lowSpecMode ? 4 : 5;
+        int markerBucketColumns = zoom >= bucketZoom
+                ? Math.floorDiv(width + markerBucketSize * 2 - 1, markerBucketSize) + 1 : 0;
+        int markerBucketRows = zoom >= bucketZoom
+                ? Math.floorDiv(height + markerBucketSize * 2 - 1, markerBucketSize) + 1 : 0;
+        int markerBucketCount = markerBucketColumns * markerBucketRows;
+        if (markerBucketCount > 0) {
+            if (markerOccupancy.length < markerBucketCount) {
+                markerOccupancy = new boolean[markerBucketCount];
+            } else {
+                java.util.Arrays.fill(markerOccupancy, 0, markerBucketCount, false);
+            }
+        }
+        for (String category : enabledCategories) {
+            MarkerCategory data = markerData.get(category);
+            if (data == null) continue;
+            double minMarkerWorldX = centerWorldX - (width / 2.0 + markerSize) / pixelsPerBlock;
+            double maxMarkerWorldX = centerWorldX + (width / 2.0 + markerSize) / pixelsPerBlock;
+            int firstMarker = lowerBoundX(data.markersByX, minMarkerWorldX);
+            for (int markerIndex = firstMarker; markerIndex < data.markersByX.size(); markerIndex++) {
+                MapMarker marker = data.markersByX.get(markerIndex);
+                if (marker.x > maxMarkerWorldX) break;
+                int x = centerX + (int) Math.round((marker.x - centerWorldX) * pixelsPerBlock);
+                int y = centerY + (int) Math.round((marker.z - centerWorldZ) * pixelsPerBlock);
+                if (x < mapX - markerSize || x > mapX + width + markerSize
+                        || y < mapY - markerSize || y > mapY + height + markerSize) continue;
+                if (markerBucketCount > 0) {
+                    int bucketX = Math.floorDiv(x - mapX + markerBucketSize, markerBucketSize);
+                    int bucketY = Math.floorDiv(y - mapY + markerBucketSize, markerBucketSize);
+                    int bucket = bucketY * markerBucketColumns + bucketX;
+                    if (bucket < 0 || bucket >= markerBucketCount || markerOccupancy[bucket]) continue;
+                    markerOccupancy[bucket] = true;
+                }
+                drawIcon(context, marker.icon, x, y, markerSize);
+                if (PlanetEarthMinimapClient.config.showMarkerLabels || inWorldPvp) {
+                    drawMarkerLabel(context, displayLabel(marker.label, inWorldPvp), x, y, markerSize);
+                }
+                if (mouseX >= 0 && Math.abs(mouseX - x) <= hitRadius && Math.abs(mouseY - y) <= hitRadius) {
+                    hovered = marker;
+                }
+            }
+        }
+        return hovered;
     }
 
     private static void renderAreas(DrawContext context, int mapX, int mapY, int width, int height,
