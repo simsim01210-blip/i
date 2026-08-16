@@ -64,6 +64,10 @@ public final class LiveAtlasMarkerManager {
     private static volatile long markerPayloadSignature = Long.MIN_VALUE;
     private static volatile String markerEtag;
     private static volatile String markerLastModified;
+    // Which Dynmap world markerData was last fetched for — "world" and "worldpvp" are
+    // two entirely separate marker feeds (marker_world.json vs marker_worldpvp.json),
+    // not just different views of the same data.
+    private static volatile String cachedMarkerWorld;
     private static volatile long nextRefresh;
     // Territory fill preparation is expensive on a large full-map viewport. Build an
     // overscanned batch and translate it while panning instead of rebuilding it for
@@ -754,8 +758,29 @@ public final class LiveAtlasMarkerManager {
         long now = System.currentTimeMillis();
         if (now < nextRefresh || !PENDING.compareAndSet(false, true)) return;
         nextRefresh = now + 2_000;
+        // World PvP has its own separate marker feed (marker_worldpvp.json) — without
+        // this, its markers were the overworld's Towny towns/goods/ports (Pretoria,
+        // 카카오, ...) drawn at whatever screen position their overworld X/Z happened to
+        // land on in the World PvP view, on top of World PvP's own correctly-fetched
+        // map tiles. Same class of bug as the tile/player fixes, just for this feed too.
+        String world = LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance());
+        if (world == null) {
+            if (!markerData.isEmpty()) markerData = Map.of();
+            markerPayloadSignature = Long.MIN_VALUE;
+            cachedMarkerWorld = null;
+            PENDING.set(false);
+            return;
+        }
+        if (!world.equals(cachedMarkerWorld)) {
+            // A different world means a different URL entirely — the previous
+            // ETag/Last-Modified belong to that other feed and would be meaningless
+            // (or simply wrong) sent against this one.
+            markerEtag = null;
+            markerLastModified = null;
+            markerPayloadSignature = Long.MIN_VALUE;
+        }
         String base = PlanetEarthMinimapClient.config.mapBaseUrl();
-        HttpRequest.Builder builder = requestBuilder(base + "/tiles/_markers_/marker_world.json");
+        HttpRequest.Builder builder = requestBuilder(base + "/tiles/_markers_/marker_" + world + ".json");
         String etag = markerEtag;
         String lastModified = markerLastModified;
         if (etag != null && !etag.isBlank()) builder.header("If-None-Match", etag);
@@ -811,6 +836,7 @@ public final class LiveAtlasMarkerManager {
                     }
                     markerData = Map.copyOf(updated);
                     markerPayloadSignature = signature;
+                    cachedMarkerWorld = world;
                     // Download every icon used by the completed snapshot up front. Rendering then only
                     // swaps atomic snapshots instead of filling markers gradually as the map moves.
                     for (MarkerCategory data : updated.values()) {
