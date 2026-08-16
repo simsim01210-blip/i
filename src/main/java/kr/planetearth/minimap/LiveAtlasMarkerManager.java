@@ -17,6 +17,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -59,8 +60,25 @@ public final class LiveAtlasMarkerManager {
     private static boolean[] markerOccupancy = new boolean[0];
     private static AreaRenderCache recentAreaCache;
     private static AreaRenderCache previousAreaCache;
+    // Reused every frame for PlatformCompat.fillBatch instead of allocating fresh
+    // arrays each time — grown, never shrunk.
+    private static int[] batchLeft = new int[256];
+    private static int[] batchTop = new int[256];
+    private static int[] batchRight = new int[256];
+    private static int[] batchBottom = new int[256];
+    private static int[] batchColor = new int[256];
 
     private LiveAtlasMarkerManager() {}
+
+    private static void ensureBatchCapacity(int needed) {
+        if (batchLeft.length >= needed) return;
+        int newSize = Math.max(needed, batchLeft.length * 2);
+        batchLeft = Arrays.copyOf(batchLeft, newSize);
+        batchTop = Arrays.copyOf(batchTop, newSize);
+        batchRight = Arrays.copyOf(batchRight, newSize);
+        batchBottom = Arrays.copyOf(batchBottom, newSize);
+        batchColor = Arrays.copyOf(batchColor, newSize);
+    }
 
     public static int count(String category) {
         MarkerCategory data = markerData.get(category);
@@ -317,23 +335,47 @@ public final class LiveAtlasMarkerManager {
 
         int fillShiftX = (int) Math.round((batch.centerWorldX - centerWorldX) * scale);
         int fillShiftY = (int) Math.round((batch.centerWorldZ - centerWorldZ) * scale);
+
+        // Every rectangle used to be its own context.fill() call — its own GPU draw
+        // call. A dense Towny city could mean well over a hundred of those every
+        // single frame even though nothing changed since the last one (the cache only
+        // avoids recomputing the geometry, not resubmitting it). Collecting them into
+        // plain int arrays and submitting the whole batch as one draw call via
+        // PlatformCompat.fillBatch cuts that down to two draw calls total (one for
+        // fills, one for outlines) regardless of how many rectangles there are.
+        ensureBatchCapacity(Math.max(batch.rectangles.size(), batch.outlines.size()));
+        int fillCount = 0;
         for (ColoredRectangle rectangle : batch.rectangles) {
             int left = rectangle.left + fillShiftX;
             int top = rectangle.top + fillShiftY;
             int right = rectangle.right + fillShiftX;
             int bottom = rectangle.bottom + fillShiftY;
             if (right <= mapX || left >= mapX + width || bottom <= mapY || top >= mapY + height) continue;
-            context.fill(left, top, right, bottom, rectangle.color);
+            batchLeft[fillCount] = left;
+            batchTop[fillCount] = top;
+            batchRight[fillCount] = right;
+            batchBottom[fillCount] = bottom;
+            batchColor[fillCount] = rectangle.color;
+            fillCount++;
         }
+        PlatformCompat.fillBatch(context, batchLeft, batchTop, batchRight, batchBottom, batchColor, fillCount);
 
+        int outlineCount = 0;
         for (ColoredRectangle outline : batch.outlines) {
             int left = outline.left + fillShiftX;
             int top = outline.top + fillShiftY;
             int right = outline.right + fillShiftX;
             int bottom = outline.bottom + fillShiftY;
             if (right <= mapX || left >= mapX + width || bottom <= mapY || top >= mapY + height) continue;
-            context.fill(left, top, right, bottom, outline.color);
+            batchLeft[outlineCount] = left;
+            batchTop[outlineCount] = top;
+            batchRight[outlineCount] = right;
+            batchBottom[outlineCount] = bottom;
+            batchColor[outlineCount] = outline.color;
+            outlineCount++;
         }
+        PlatformCompat.fillBatch(context, batchLeft, batchTop, batchRight, batchBottom, batchColor, outlineCount);
+
         for (ColoredLine line : batch.diagonalOutlines) {
             drawClippedLine(context, line.x1 + fillShiftX, line.y1 + fillShiftY,
                     line.x2 + fillShiftX, line.y2 + fillShiftY,
