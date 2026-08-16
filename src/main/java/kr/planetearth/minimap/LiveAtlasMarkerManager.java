@@ -28,6 +28,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** PlanetEarth's public Dynmap marker sets and their original icon textures. */
@@ -43,20 +45,31 @@ public final class LiveAtlasMarkerManager {
         CATEGORIES.put("townykoth.markerset", "TownyKOTH");
     }
 
+    private static final ExecutorService HTTP_EXECUTOR =
+            Executors.newFixedThreadPool(2, runnable -> {
+                Thread thread = new Thread(runnable, "planetearth-marker-http");
+                thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 2));
+                return thread;
+            });
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .followRedirects(HttpClient.Redirect.NORMAL)
+            .executor(HTTP_EXECUTOR)
             .build();
     private static final AtomicBoolean PENDING = new AtomicBoolean();
     private static final Map<String, Identifier> ICONS = new ConcurrentHashMap<>();
     private static final Set<String> ICON_PENDING = ConcurrentHashMap.newKeySet();
     private static volatile Map<String, MarkerCategory> markerData = Map.of();
     private static volatile long markerPayloadSignature = Long.MIN_VALUE;
+    private static volatile String markerEtag;
+    private static volatile String markerLastModified;
     private static volatile long nextRefresh;
     // Territory fill preparation is expensive on a large full-map viewport. Build an
     // overscanned batch and translate it while panning instead of rebuilding it for
     // every single mouse pixel.
-    private static final int AREA_CACHE_MARGIN = 192;
+    private static final int MIN_AREA_CACHE_MARGIN = 64;
+    private static final int MAX_AREA_CACHE_MARGIN = 192;
     private static boolean[] markerOccupancy = new boolean[0];
     private static AreaRenderCache recentAreaCache;
     private static AreaRenderCache previousAreaCache;
@@ -67,6 +80,9 @@ public final class LiveAtlasMarkerManager {
     private static int[] batchRight = new int[256];
     private static int[] batchBottom = new int[256];
     private static int[] batchColor = new int[256];
+    // Reused by the polygon scanline rasterizer. The old List<Double> path boxed every
+    // intersection and allocated another double[] for every span on every screen row.
+    private static double[] scanlineScratch = new double[64];
 
     private LiveAtlasMarkerManager() {}
 
@@ -158,9 +174,10 @@ public final class LiveAtlasMarkerManager {
                 // pixels. Drawing all of those hidden layers only adds GPU work, so
                 // collapse overlapping screen buckets at the two farthest levels.
                 int markerBucketSize = Math.max(6, markerSize * 3 / 4);
-                int markerBucketColumns = zoom >= 6
+                int bucketZoom = PlanetEarthMinimapClient.config.lowSpecMode ? 4 : 5;
+                int markerBucketColumns = zoom >= bucketZoom
                         ? Math.floorDiv(width + markerBucketSize * 2 - 1, markerBucketSize) + 1 : 0;
-                int markerBucketRows = zoom >= 6
+                int markerBucketRows = zoom >= bucketZoom
                         ? Math.floorDiv(height + markerBucketSize * 2 - 1, markerBucketSize) + 1 : 0;
                 int markerBucketCount = markerBucketColumns * markerBucketRows;
                 if (markerBucketCount > 0) {
@@ -241,13 +258,14 @@ public final class LiveAtlasMarkerManager {
                                     Set<String> enabledCategories) {
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
+        int cacheMargin = areaCacheMargin(width, height);
         Map<String, MarkerCategory> snapshot = markerData;
         AreaRenderCache batch = findAreaCache(snapshot, enabledCategories,
                 mapX, mapY, width, height, centerWorldX, centerWorldZ, scale);
         if (batch == null) {
             List<MapArea> visible = new ArrayList<>();
-            double halfWorldWidth = (width / 2.0 + AREA_CACHE_MARGIN) / scale;
-            double halfWorldHeight = (height / 2.0 + AREA_CACHE_MARGIN) / scale;
+            double halfWorldWidth = (width / 2.0 + cacheMargin) / scale;
+            double halfWorldHeight = (height / 2.0 + cacheMargin) / scale;
             double minVisibleX = centerWorldX - halfWorldWidth;
             double maxVisibleX = centerWorldX + halfWorldWidth;
             double minVisibleZ = centerWorldZ - halfWorldHeight;
@@ -263,10 +281,10 @@ public final class LiveAtlasMarkerManager {
             }
 
             Map<Integer, Map<Integer, List<int[]>>> spansByColor = new LinkedHashMap<>();
-            int clipLeft = mapX - AREA_CACHE_MARGIN;
-            int clipTop = mapY - AREA_CACHE_MARGIN;
-            int clipRight = mapX + width + AREA_CACHE_MARGIN;
-            int clipBottom = mapY + height + AREA_CACHE_MARGIN;
+            int clipLeft = mapX - cacheMargin;
+            int clipTop = mapY - cacheMargin;
+            int clipRight = mapX + width + cacheMargin;
+            int clipBottom = mapY + height + cacheMargin;
             for (MapArea area : visible) {
                 // Preserve both the RGB and fill opacity supplied by LiveAtlas.
                 int r = (area.fillColor >> 16) & 0xFF;
@@ -292,9 +310,13 @@ public final class LiveAtlasMarkerManager {
                         centerY + (int) Math.ceil((area.maxZ - centerWorldZ) * scale));
                 for (int row = areaTop; row < areaBottom; row++) {
                     double sampleWorldZ = centerWorldZ + (row + 0.5 - centerY) / scale;
-                    for (double[] interval : scanlineIntervals(area.x, area.z, sampleWorldZ)) {
-                        int left = centerX + (int) Math.floor((interval[0] - centerWorldX) * scale);
-                        int right = centerX + (int) Math.ceil((interval[1] - centerWorldX) * scale);
+                    int intersections = scanlineIntersections(area.x, area.z, sampleWorldZ);
+                    for (int interval = 0; interval + 1 < intersections; interval += 2) {
+                        double intervalLeft = scanlineScratch[interval];
+                        double intervalRight = scanlineScratch[interval + 1];
+                        if (intervalRight <= intervalLeft) continue;
+                        int left = centerX + (int) Math.floor((intervalLeft - centerWorldX) * scale);
+                        int right = centerX + (int) Math.ceil((intervalRight - centerWorldX) * scale);
                         if (right <= clipLeft || left >= clipRight) continue;
                         left = Math.max(clipLeft, left);
                         right = Math.min(clipRight, Math.max(left + 1, right));
@@ -328,6 +350,7 @@ public final class LiveAtlasMarkerManager {
             }
             batch = new AreaRenderCache(snapshot, Set.copyOf(enabledCategories), mapX, mapY,
                     width, height, centerWorldX, centerWorldZ, scale,
+                    cacheMargin,
                     List.copyOf(rectangles), mergeOutlineSegments(uniqueOutlines),
                     List.copyOf(diagonalOutlines));
             cacheAreaBatch(batch);
@@ -482,6 +505,11 @@ public final class LiveAtlasMarkerManager {
     private static void cacheAreaBatch(AreaRenderCache batch) {
         previousAreaCache = recentAreaCache;
         recentAreaCache = batch;
+    }
+
+    private static int areaCacheMargin(int width, int height) {
+        return MathHelper.clamp(Math.max(width, height) / 3,
+                MIN_AREA_CACHE_MARGIN, MAX_AREA_CACHE_MARGIN);
     }
 
     /** Merges equal spans on adjacent rows into cached rectangles. */
@@ -709,11 +737,21 @@ public final class LiveAtlasMarkerManager {
         long now = System.currentTimeMillis();
         if (now < nextRefresh || !PENDING.compareAndSet(false, true)) return;
         nextRefresh = now + 2_000;
-        String base = PlanetEarthMinimapClient.config.mapUrl.replaceAll("/+$", "");
-        HttpRequest request = request(base + "/tiles/_markers_/marker_world.json");
-        HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        String base = PlanetEarthMinimapClient.config.mapBaseUrl();
+        HttpRequest.Builder builder = requestBuilder(base + "/tiles/_markers_/marker_world.json");
+        String etag = markerEtag;
+        String lastModified = markerLastModified;
+        if (etag != null && !etag.isBlank()) builder.header("If-None-Match", etag);
+        if (lastModified != null && !lastModified.isBlank()) {
+            builder.header("If-Modified-Since", lastModified);
+        }
+        HTTP.sendAsync(builder.GET().build(), HttpResponse.BodyHandlers.ofString())
                 .thenAccept(response -> {
+                    if (response.statusCode() == 304) return;
                     if (response.statusCode() != 200) return;
+                    response.headers().firstValue("ETag").ifPresent(value -> markerEtag = value);
+                    response.headers().firstValue("Last-Modified")
+                            .ifPresent(value -> markerLastModified = value);
                     String body = response.body();
                     long signature = ((long) body.length() << 32)
                             ^ (body.hashCode() & 0xFFFFFFFFL);
@@ -770,8 +808,13 @@ public final class LiveAtlasMarkerManager {
     }
 
     private static void requestIcon(String iconName) {
-        if (iconName == null || iconName.isBlank() || !ICON_PENDING.add(iconName)) return;
-        String base = PlanetEarthMinimapClient.config.mapUrl.replaceAll("/+$", "");
+        if (iconName == null || iconName.isBlank() || ICONS.containsKey(iconName)
+                || !ICON_PENDING.add(iconName)) return;
+        if (ICONS.containsKey(iconName)) {
+            ICON_PENDING.remove(iconName);
+            return;
+        }
+        String base = PlanetEarthMinimapClient.config.mapBaseUrl();
         HTTP.sendAsync(request(base + "/tiles/_markers_/" + iconName + ".png"),
                         HttpResponse.BodyHandlers.ofByteArray())
                 .thenAccept(response -> {
@@ -814,12 +857,15 @@ public final class LiveAtlasMarkerManager {
     }
 
     private static HttpRequest request(String url) {
-        String base = PlanetEarthMinimapClient.config.mapUrl.replaceAll("/+$", "");
+        return requestBuilder(url).GET().build();
+    }
+
+    private static HttpRequest.Builder requestBuilder(String url) {
+        String base = PlanetEarthMinimapClient.config.mapBaseUrl();
         return HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(20))
                 .header("User-Agent", "PlanetEarthMinimap/0.8")
-                .header("Referer", base + "/")
-                .GET().build();
+                .header("Referer", base + "/");
     }
 
     private static double[] toDoubleArray(com.google.gson.JsonArray array) {
@@ -866,25 +912,24 @@ public final class LiveAtlasMarkerManager {
      * scanline rule. Used to fill one screen row at a time, sampled at that row's own
      * world-Z centre — see the call site in {@link #renderAreas} for why.
      */
-    private static List<double[]> scanlineIntervals(double[] x, double[] z, double sampleZ) {
-        List<Double> intersections = new ArrayList<>();
+    private static int scanlineIntersections(double[] x, double[] z, double sampleZ) {
+        if (scanlineScratch.length < x.length) {
+            int newSize = scanlineScratch.length;
+            while (newSize < x.length) newSize *= 2;
+            scanlineScratch = Arrays.copyOf(scanlineScratch, newSize);
+        }
+        int count = 0;
         for (int i = 0; i < x.length; i++) {
             int next = (i + 1) % x.length;
             double z1 = z[i];
             double z2 = z[next];
             if ((z1 <= sampleZ && z2 > sampleZ) || (z2 <= sampleZ && z1 > sampleZ)) {
                 double ratio = (sampleZ - z1) / (z2 - z1);
-                intersections.add(x[i] + (x[next] - x[i]) * ratio);
+                scanlineScratch[count++] = x[i] + (x[next] - x[i]) * ratio;
             }
         }
-        intersections.sort(Double::compareTo);
-        List<double[]> result = new ArrayList<>(intersections.size() / 2);
-        for (int i = 0; i + 1 < intersections.size(); i += 2) {
-            double leftX = intersections.get(i);
-            double rightX = intersections.get(i + 1);
-            if (rightX > leftX) result.add(new double[]{leftX, rightX});
-        }
-        return result;
+        Arrays.sort(scanlineScratch, 0, count);
+        return count;
     }
 
     private static boolean insidePolygon(double px, double pz, double[] x, double[] z) {
@@ -949,6 +994,7 @@ public final class LiveAtlasMarkerManager {
         private final double centerWorldX;
         private final double centerWorldZ;
         private final long scaleBits;
+        private final int margin;
         private final List<ColoredRectangle> rectangles;
         private final List<ColoredRectangle> outlines;
         private final List<ColoredLine> diagonalOutlines;
@@ -956,6 +1002,7 @@ public final class LiveAtlasMarkerManager {
         private AreaRenderCache(Map<String, MarkerCategory> snapshot, Set<String> categories,
                                 int mapX, int mapY, int width, int height,
                                 double centerWorldX, double centerWorldZ, double scale,
+                                int margin,
                                 List<ColoredRectangle> rectangles,
                                 List<ColoredRectangle> outlines,
                                 List<ColoredLine> diagonalOutlines) {
@@ -968,6 +1015,7 @@ public final class LiveAtlasMarkerManager {
             this.centerWorldX = centerWorldX;
             this.centerWorldZ = centerWorldZ;
             this.scaleBits = Double.doubleToLongBits(scale);
+            this.margin = margin;
             this.rectangles = rectangles;
             this.outlines = outlines;
             this.diagonalOutlines = diagonalOutlines;
@@ -982,9 +1030,9 @@ public final class LiveAtlasMarkerManager {
                     && this.width == width && this.height == height
                     && scaleBits == Double.doubleToLongBits(scale)
                     && Math.abs((this.centerWorldX - centerWorldX) * scale)
-                            <= AREA_CACHE_MARGIN - 2
+                            <= margin - 2
                     && Math.abs((this.centerWorldZ - centerWorldZ) * scale)
-                            <= AREA_CACHE_MARGIN - 2
+                            <= margin - 2
                     && categories.equals(enabledCategories);
         }
     }

@@ -149,7 +149,7 @@ public final class LiveAtlasPlayerManager {
 
     private static void requestFace(String account, String key) {
         if (account == null || account.isBlank() || !FACE_PENDING.add(key)) return;
-        String base = PlanetEarthMinimapClient.config.mapUrl.replaceAll("/+$", "");
+        String base = PlanetEarthMinimapClient.config.mapBaseUrl();
         String url = base + "/tiles/faces/16x16/" + account + ".png";
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(12))
@@ -213,8 +213,17 @@ public final class LiveAtlasPlayerManager {
         long now = System.currentTimeMillis();
         if (now < nextRefresh || !PENDING.compareAndSet(false, true)) return;
         nextRefresh = now + 500;
-        String base = PlanetEarthMinimapClient.config.mapUrl.replaceAll("/+$", "");
-        String url = base + "/up/world/world/" + now;
+        // Follows whichever Dynmap world the player is actually standing in (world,
+        // worldpvp, ...) instead of always polling "world" — otherwise the corner
+        // minimap kept showing overworld players' dots while standing in World PvP,
+        // and worldpvp players never showed up at all.
+        String world = LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance());
+        if (world == null) {
+            PENDING.set(false);
+            return;
+        }
+        String base = PlanetEarthMinimapClient.config.mapBaseUrl();
+        String url = base + "/up/world/" + world + "/" + now;
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(12))
                 .header("User-Agent", "PlanetEarthMinimap/0.1")
@@ -228,7 +237,7 @@ public final class LiveAtlasPlayerManager {
                     List<WebPlayer> updated = new ArrayList<>();
                     for (JsonElement element : root.getAsJsonArray("players")) {
                         JsonObject object = element.getAsJsonObject();
-                        if (!"world".equals(object.get("world").getAsString())) continue;
+                        if (!world.equals(object.get("world").getAsString())) continue;
                         updated.add(new WebPlayer(
                                 object.get("name").getAsString(),
                                 object.get("account").getAsString(),
@@ -259,7 +268,7 @@ public final class LiveAtlasPlayerManager {
                             long version = update.has("timestamp")
                                     ? update.get("timestamp").getAsLong()
                                     : System.currentTimeMillis();
-                            LiveAtlasTileManager.onTileUpdate(update.get("name").getAsString(), version);
+                            LiveAtlasTileManager.onTileUpdate(world, update.get("name").getAsString(), version);
                         }
                     }
                 })

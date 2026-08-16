@@ -24,6 +24,7 @@ import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 
@@ -32,7 +33,13 @@ public final class LiveAtlasTileManager {
     private static final int TILE_SIZE = 128;
     // A 1920x1080 full-map viewport alone can need around 150 tiles. The old
     // 96-tile limit evicted visible tiles before the viewport could finish loading.
-    private static final int MAX_TILES = 768;
+    private static final int NORMAL_MAX_TILES = 768;
+    private static final int LOW_SPEC_MAX_TILES = 384;
+    // A full-screen viewport can ask for well over a hundred tiles in one frame.
+    // Keep enough requests in flight to saturate the workers without retaining an
+    // unbounded number of response byte arrays and decoded NativeImages.
+    private static final int NORMAL_MAX_PENDING = 64;
+    private static final int LOW_SPEC_MAX_PENDING = 24;
     private static final int EMPTY_TILE_MAX_BYTES = 256;
     private static final double MAP_SCALE = 4.0;
     private static final long FALLBACK_REFRESH_NANOS = Duration.ofMinutes(10).toNanos();
@@ -45,7 +52,7 @@ public final class LiveAtlasTileManager {
     // Leaving a couple of cores free for the game itself trades a bit of initial-load
     // speed for not stealing frame time.
     private static final int NORMAL_POOL_SIZE =
-            Math.max(3, Math.min(8, Runtime.getRuntime().availableProcessors() - 2));
+            Math.max(2, Math.min(6, Runtime.getRuntime().availableProcessors() - 2));
     // 저사양 모드: leaves even more cores free for the game at the cost of slower tile
     // loading — see PlanetEarthMinimapClient.applyLowSpecMode.
     private static final int LOW_SPEC_POOL_SIZE = Math.max(1, NORMAL_POOL_SIZE / 2);
@@ -53,22 +60,35 @@ public final class LiveAtlasTileManager {
             Executors.newFixedThreadPool(NORMAL_POOL_SIZE, runnable -> {
                 Thread thread = new Thread(runnable, "planetearth-tile-worker");
                 thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+                return thread;
+            });
+    // HttpClient bookkeeping must stay responsive even while every tile worker is
+    // busy decoding WebP pixels. These threads spend almost all of their time waiting
+    // for the network and do not increase the number of simultaneous CPU decodes.
+    private static final ExecutorService HTTP_EXECUTOR =
+            Executors.newFixedThreadPool(2, runnable -> {
+                Thread thread = new Thread(runnable, "planetearth-tile-http");
+                thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 2));
                 return thread;
             });
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .version(HttpClient.Version.HTTP_2)
-            .executor(TILE_EXECUTOR)
+            .executor(HTTP_EXECUTOR)
             .build();
     private static final Map<TileKey, Tile> TILES = new ConcurrentHashMap<>();
     private static final Map<TileKey, CompletableFuture<?>> PENDING = new ConcurrentHashMap<>();
     private static final Map<TileKey, Long> RETRY_AFTER = new ConcurrentHashMap<>();
     private static final Map<TileKey, Long> UPDATE_VERSIONS = new ConcurrentHashMap<>();
     private static final Map<TileKey, PendingUpload> READY_UPLOADS = new ConcurrentHashMap<>();
+    private static final Map<String, TileKey> ACTIVE_BY_PATH = new ConcurrentHashMap<>();
     private static final Queue<TileKey> READY_UPLOAD_ORDER = new ConcurrentLinkedQueue<>();
     private static VisibleTileOrder recentTileOrder;
     private static VisibleTileOrder previousTileOrder;
+    private static long nextMetadataCleanup;
 
     private LiveAtlasTileManager() {}
 
@@ -84,6 +104,22 @@ public final class LiveAtlasTileManager {
             TILE_EXECUTOR.setCorePoolSize(size);
             TILE_EXECUTOR.setMaximumPoolSize(size);
         }
+        trimCache(MinecraftClient.getInstance());
+    }
+
+    /** Which Dynmap "world" the player's current Minecraft dimension corresponds to,
+     *  or null if this server doesn't publish a map for it at all. Matched by registry
+     *  key path only, not the full namespaced identifier — Paper commonly registers
+     *  non-vanilla worlds like this one under a namespace that isn't "minecraft", and
+     *  the path alone ("worldpvp") is what actually identifies it either way. Shared
+     *  with LiveAtlasPlayerManager so the player list stays consistent with whichever
+     *  map is actually on screen. */
+    static String currentDynmapWorld(MinecraftClient client) {
+        if (client.world == null) return null;
+        Identifier id = client.world.getRegistryKey().getValue();
+        if (id.equals(World.OVERWORLD.getValue())) return "world";
+        if ("worldpvp".equals(id.getPath())) return "worldpvp";
+        return null;
     }
 
     public static boolean render(DrawContext context, int x, int y, int width, int height,
@@ -94,17 +130,16 @@ public final class LiveAtlasTileManager {
 
     public static boolean render(DrawContext context, int x, int y, int width, int height,
                                  double playerX, double playerZ, int requestedZoom) {
-        // The tile URL is always "/tiles/world/..." — there is only ever an overworld
-        // map. In the Nether, X/Z are scaled 1:8 versus the overworld, so once the
-        // player zoomed out far enough the requested tile keys would coincidentally
-        // land on real (but totally unrelated) overworld tiles and the loading
-        // indicator would wrongly disappear, showing that unrelated map as if this
-        // world were supported. Treating every non-overworld dimension as having no
-        // map at all avoids that regardless of zoom or what happens to be cached.
+        // Every dimension's tiles now live under their own "/tiles/<world>/..." path
+        // (see currentDynmapWorld), instead of every non-overworld dimension being
+        // treated as unsupported. That blanket rule used to also cover World PvP,
+        // which the server actually does publish a real map for — it was only ever
+        // needed for the Nether, where X/Z are scaled 1:8 versus the overworld, so
+        // zooming out far enough used to make requested tile keys coincidentally land
+        // on real (but totally unrelated) overworld tiles.
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world == null || client.world.getRegistryKey() != World.OVERWORLD) {
-            return false;
-        }
+        String world = currentDynmapWorld(client);
+        if (world == null) return false;
         int zoom = Math.max(0, Math.min(requestedZoom, 7));
         int zoomFactor = 1 << zoom;
 
@@ -121,6 +156,7 @@ public final class LiveAtlasTileManager {
         boolean drewAny = false;
         boolean missingAny = false;
         long now = System.nanoTime();
+        cleanupMetadata(now);
 
         // The same update request used for live player positions also contains the
         // exact tile paths changed by Dynmap. Poll it even when player markers are off.
@@ -130,12 +166,13 @@ public final class LiveAtlasTileManager {
         // viewport edges. Row-major order made a large full map feel much slower.
         double centerTileX = centerMapX / TILE_SIZE;
         double centerTileY = centerMapY / TILE_SIZE;
-        VisibleTileOrder tileOrder = visibleTileOrder(zoom,
+        VisibleTileOrder tileOrder = visibleTileOrder(world, zoom,
                 firstTileX, lastTileX, firstTileY, lastTileY, centerTileX, centerTileY);
         // Do not let a burst of completed HTTP requests upload every texture in one
         // client tick. Prioritize the current viewport within a small per-frame
         // budget, then use any spare slots for prefetched or previously visible tiles.
-        uploadReadyTiles(tileOrder.keys, width >= 600 ? 6 : 3);
+        uploadReadyTiles(tileOrder.keys, width >= 600 ? 4 : 2,
+                width >= 600 ? 2_000_000L : 1_000_000L);
 
         context.enableScissor(x, y, x + width, y + height);
         for (TileKey key : tileOrder.keys) {
@@ -165,7 +202,7 @@ public final class LiveAtlasTileManager {
         // 저사양 모드 skips this entirely — it's a "nice to have" that trades some
         // bandwidth/CPU for smoother panning, exactly the kind of thing to cut first.
         if (!missingAny && !tileOrder.prefetched && !PlanetEarthMinimapClient.config.lowSpecMode) {
-            prefetchBorder(zoom, firstTileX, lastTileX, firstTileY, lastTileY,
+            prefetchBorder(world, zoom, firstTileX, lastTileX, firstTileY, lastTileY,
                     centerTileX, centerTileY);
             tileOrder.prefetched = true;
         }
@@ -175,16 +212,16 @@ public final class LiveAtlasTileManager {
         return drewAny && !missingAny;
     }
 
-    private static VisibleTileOrder visibleTileOrder(int zoom,
+    private static VisibleTileOrder visibleTileOrder(String world, int zoom,
                                                      int firstTileX, int lastTileX,
                                                      int firstTileY, int lastTileY,
                                                      double centerTileX, double centerTileY) {
         if (recentTileOrder != null && recentTileOrder.matches(
-                zoom, firstTileX, lastTileX, firstTileY, lastTileY)) {
+                world, zoom, firstTileX, lastTileX, firstTileY, lastTileY)) {
             return recentTileOrder;
         }
         if (previousTileOrder != null && previousTileOrder.matches(
-                zoom, firstTileX, lastTileX, firstTileY, lastTileY)) {
+                world, zoom, firstTileX, lastTileX, firstTileY, lastTileY)) {
             VisibleTileOrder found = previousTileOrder;
             previousTileOrder = recentTileOrder;
             recentTileOrder = found;
@@ -194,12 +231,12 @@ public final class LiveAtlasTileManager {
         List<TileKey> keys = new ArrayList<>();
         for (int tileY = firstTileY; tileY <= lastTileY; tileY++) {
             for (int tileX = firstTileX; tileX <= lastTileX; tileX++) {
-                keys.add(new TileKey(zoom, tileX, tileY));
+                keys.add(new TileKey(world, zoom, tileX, tileY));
             }
         }
         keys.sort(Comparator.comparingDouble(key ->
                 square(key.x + 0.5 - centerTileX) + square(key.y + 0.5 - centerTileY)));
-        VisibleTileOrder created = new VisibleTileOrder(zoom,
+        VisibleTileOrder created = new VisibleTileOrder(world, zoom,
                 firstTileX, lastTileX, firstTileY, lastTileY, List.copyOf(keys));
         previousTileOrder = recentTileOrder;
         recentTileOrder = created;
@@ -210,20 +247,37 @@ public final class LiveAtlasTileManager {
         long now = System.nanoTime();
         Long retryAfter = RETRY_AFTER.get(key);
         if (retryAfter != null && now < retryAfter) return;
-        CompletableFuture<?> pending = PENDING.computeIfAbsent(key, ignored -> {
+        // Returning here is also important for allocation pressure: the old code
+        // attached another whenComplete callback every frame while the same request
+        // was pending. A large full-map viewport could therefore build thousands of
+        // duplicate callbacks before a slow tile finished.
+        if (PENDING.containsKey(key)) return;
+        if (PENDING.size() >= maxPendingRequests()) return;
+
+        CompletableFuture<Void> lifecycle = new CompletableFuture<>();
+        if (PENDING.putIfAbsent(key, lifecycle) != null) return;
+        String path = relativePath(key);
+        String activeKey = activeKey(key);
+        ACTIVE_BY_PATH.put(activeKey, key);
+        lifecycle.whenComplete((unused, error) -> {
+            PENDING.remove(key, lifecycle);
+            if (!TILES.containsKey(key) && !READY_UPLOADS.containsKey(key)) {
+                ACTIVE_BY_PATH.remove(activeKey, key);
+            }
+        });
+        try {
             long version = Math.max(requestedVersion, UPDATE_VERSIONS.getOrDefault(key, 0L));
-            String base = PlanetEarthMinimapClient.config.mapUrl.replaceAll("/+$", "");
-            String url = base + "/tiles/world/" + relativePath(key)
+            String base = PlanetEarthMinimapClient.config.mapBaseUrl();
+            String url = base + "/tiles/" + key.world + "/" + path
                     + (version > 0 ? "?timestamp=" + version : "");
-            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+            HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(url))
                     .timeout(Duration.ofSeconds(12))
                     .header("User-Agent", "PlanetEarthMinimap/0.1")
                     .header("Referer", base + "/")
                     .GET()
                     .build();
-            CompletableFuture<Void> lifecycle = new CompletableFuture<>();
-            HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
-                    .thenApply(response -> {
+            HTTP.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofByteArray())
+                    .thenApplyAsync(response -> {
                         if (response.statusCode() != 200
                                 || response.body().length <= EMPTY_TILE_MAX_BYTES) {
                             // LiveAtlas answers with HTTP 200 and a ~116-byte solid-blue
@@ -233,7 +287,7 @@ public final class LiveAtlasTileManager {
                             return null;
                         }
                         return decode(response.body());
-                    })
+                    }, TILE_EXECUTOR)
                     .thenAccept(image -> {
                         if (image == null) {
                             lifecycle.complete(null);
@@ -247,24 +301,22 @@ public final class LiveAtlasTileManager {
                         lifecycle.completeExceptionally(error);
                         return null;
                     });
-            return lifecycle;
-        });
-        // Keep the key pending until the texture has actually been uploaded on the
-        // render thread. HTTP completion alone is too early and causes duplicate
-        // downloads/uploads while the render task is still queued.
-        pending.whenComplete((unused, error) -> PENDING.remove(key, pending));
+        } catch (Throwable error) {
+            lifecycle.completeExceptionally(error);
+        }
     }
 
-    private static void uploadReadyTiles(List<TileKey> visibleKeys, int budget) {
+    private static void uploadReadyTiles(List<TileKey> visibleKeys, int budget, long maxNanos) {
         int uploaded = 0;
+        long deadline = System.nanoTime() + maxNanos;
         for (TileKey key : visibleKeys) {
-            if (uploaded >= budget) return;
+            if (uploaded >= budget || (uploaded > 0 && System.nanoTime() >= deadline)) return;
             PendingUpload ready = READY_UPLOADS.remove(key);
             if (ready == null) continue;
             finishUpload(ready);
             uploaded++;
         }
-        while (uploaded < budget) {
+        while (uploaded < budget && (uploaded == 0 || System.nanoTime() < deadline)) {
             TileKey key = READY_UPLOAD_ORDER.poll();
             if (key == null) return;
             PendingUpload ready = READY_UPLOADS.remove(key);
@@ -284,38 +336,38 @@ public final class LiveAtlasTileManager {
         }
     }
 
-    /** Called with the tile update records returned by Dynmap's live update feed. */
-    static void onTileUpdate(String path, long version) {
-        if (path == null || !path.startsWith("flat/")) return;
+    /** Called with the tile update records returned by Dynmap's live update feed for
+     *  the given world. */
+    static void onTileUpdate(String world, String path, long version) {
+        if (path == null) return;
         String normalized = path.replace('\\', '/');
-        for (TileKey key : PENDING.keySet()) {
-            if (relativePath(key).equals(normalized)) {
-                UPDATE_VERSIONS.merge(key, version, Math::max);
-            }
-        }
-        for (TileKey key : TILES.keySet()) {
-            if (!relativePath(key).equals(normalized)) continue;
-            UPDATE_VERSIONS.merge(key, version, Math::max);
-            request(key, version);
-        }
+        if (!normalized.startsWith("flat/")) return;
+        TileKey key = ACTIVE_BY_PATH.get(world + "/" + normalized);
+        if (key == null) return;
+        UPDATE_VERSIONS.merge(key, version, Math::max);
+        if (TILES.containsKey(key)) request(key, version);
     }
 
-    private static void prefetchBorder(int zoom, int firstX, int lastX, int firstY, int lastY,
-                                       double centerX, double centerY) {
+    private static void prefetchBorder(String world, int zoom, int firstX, int lastX,
+                                       int firstY, int lastY, double centerX, double centerY) {
         List<TileKey> border = new ArrayList<>();
         for (int x = firstX - 1; x <= lastX + 1; x++) {
-            border.add(new TileKey(zoom, x, firstY - 1));
-            border.add(new TileKey(zoom, x, lastY + 1));
+            border.add(new TileKey(world, zoom, x, firstY - 1));
+            border.add(new TileKey(world, zoom, x, lastY + 1));
         }
         for (int y = firstY; y <= lastY; y++) {
-            border.add(new TileKey(zoom, firstX - 1, y));
-            border.add(new TileKey(zoom, lastX + 1, y));
+            border.add(new TileKey(world, zoom, firstX - 1, y));
+            border.add(new TileKey(world, zoom, lastX + 1, y));
         }
         border.sort(Comparator.comparingDouble(key ->
                 square(key.x + 0.5 - centerX) + square(key.y + 0.5 - centerY)));
         for (TileKey key : border) {
             if (!TILES.containsKey(key)) request(key, 0L);
         }
+    }
+
+    private static String activeKey(TileKey key) {
+        return key.world + "/" + relativePath(key);
     }
 
     private static String relativePath(TileKey key) {
@@ -372,13 +424,17 @@ public final class LiveAtlasTileManager {
             client.getTextureManager().destroyTexture(previous.textureId);
         }
         Identifier id = PlatformCompat.registerDynamicTexture(client.getTextureManager(),
-                "tile/" + key.zoom + "_" + key.x + "_" + key.y, image);
+                "tile/" + key.world + "_" + key.zoom + "_" + key.x + "_" + key.y, image);
         TILES.put(key, new Tile(id, version));
+        ACTIVE_BY_PATH.put(activeKey(key), key);
         trimCache(client);
     }
 
     private static void trimCache(MinecraftClient client) {
-        while (TILES.size() > MAX_TILES) {
+        int limit = PlanetEarthMinimapClient.config != null
+                && PlanetEarthMinimapClient.config.lowSpecMode
+                ? LOW_SPEC_MAX_TILES : NORMAL_MAX_TILES;
+        while (TILES.size() > limit) {
             Iterator<Map.Entry<TileKey, Tile>> iterator = TILES.entrySet().iterator();
             if (!iterator.hasNext()) return;
             Map.Entry<TileKey, Tile> oldest = iterator.next();
@@ -387,6 +443,34 @@ public final class LiveAtlasTileManager {
             }
             if (TILES.remove(oldest.getKey(), oldest.getValue())) {
                 client.getTextureManager().destroyTexture(oldest.getValue().textureId);
+                if (!PENDING.containsKey(oldest.getKey())) {
+                    UPDATE_VERSIONS.remove(oldest.getKey());
+                    RETRY_AFTER.remove(oldest.getKey());
+                    ACTIVE_BY_PATH.remove(activeKey(oldest.getKey()), oldest.getKey());
+                }
+            }
+        }
+    }
+
+    private static int maxPendingRequests() {
+        return PlanetEarthMinimapClient.config != null
+                && PlanetEarthMinimapClient.config.lowSpecMode
+                ? LOW_SPEC_MAX_PENDING : NORMAL_MAX_PENDING;
+    }
+
+    /** Bounds metadata left behind by missing tiles or tiles evicted from the GPU cache. */
+    private static void cleanupMetadata(long now) {
+        if (now < nextMetadataCleanup) return;
+        nextMetadataCleanup = now + Duration.ofSeconds(30).toNanos();
+        for (Map.Entry<TileKey, Long> entry : RETRY_AFTER.entrySet()) {
+            if (entry.getValue() <= now) RETRY_AFTER.remove(entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<TileKey, Long> entry : UPDATE_VERSIONS.entrySet()) {
+            TileKey key = entry.getKey();
+            if (!TILES.containsKey(key) && !PENDING.containsKey(key)
+                    && !READY_UPLOADS.containsKey(key)) {
+                UPDATE_VERSIONS.remove(key, entry.getValue());
+                ACTIVE_BY_PATH.remove(activeKey(key), key);
             }
         }
     }
@@ -395,12 +479,13 @@ public final class LiveAtlasTileManager {
         return Math.floorDiv(value, divisor);
     }
 
-    private record TileKey(int zoom, int x, int y) {}
+    private record TileKey(String world, int zoom, int x, int y) {}
 
     private record PendingUpload(TileKey key, NativeImage image, long version,
                                  CompletableFuture<Void> lifecycle) {}
 
     private static final class VisibleTileOrder {
+        private final String world;
         private final int zoom;
         private final int firstX;
         private final int lastX;
@@ -409,8 +494,9 @@ public final class LiveAtlasTileManager {
         private final List<TileKey> keys;
         private boolean prefetched;
 
-        private VisibleTileOrder(int zoom, int firstX, int lastX,
+        private VisibleTileOrder(String world, int zoom, int firstX, int lastX,
                                  int firstY, int lastY, List<TileKey> keys) {
+            this.world = world;
             this.zoom = zoom;
             this.firstX = firstX;
             this.lastX = lastX;
@@ -419,9 +505,9 @@ public final class LiveAtlasTileManager {
             this.keys = keys;
         }
 
-        private boolean matches(int zoom, int firstX, int lastX, int firstY, int lastY) {
-            return this.zoom == zoom && this.firstX == firstX && this.lastX == lastX
-                    && this.firstY == firstY && this.lastY == lastY;
+        private boolean matches(String world, int zoom, int firstX, int lastX, int firstY, int lastY) {
+            return this.world.equals(world) && this.zoom == zoom && this.firstX == firstX
+                    && this.lastX == lastX && this.firstY == firstY && this.lastY == lastY;
         }
     }
 

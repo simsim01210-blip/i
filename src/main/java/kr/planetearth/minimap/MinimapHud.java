@@ -5,7 +5,6 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.render.Camera;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.text.Text;
-import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.biome.Biome;
@@ -13,12 +12,9 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 
 public final class MinimapHud {
-    private static final Identifier LOADING_HEAD = Identifier.tryParse(
-            PlanetEarthMinimapClient.MOD_ID + ":textures/gui/loading_head.png");
     // The small corner minimap and the "hold G" overlay map can both be on screen in
     // the same frame and cover different areas, so each needs its own independent
     // loading-indicator state. Sharing one used to make the indicator flicker: whichever
@@ -26,9 +22,32 @@ public final class MinimapHud {
     private static final LoadingState MINIMAP_LOADING = new LoadingState();
     private static final LoadingState OVERLAY_LOADING = new LoadingState();
     private static boolean overlayMapWasHeld;
+    private static final int MAX_HUD_WAYPOINTS = 12;
     // Reused every frame instead of allocating a fresh ArrayList to sort-by-distance
     // in, since this runs unconditionally whenever any waypoints are shown at all.
     private static final List<MinimapConfig.Waypoint> waypointDistanceScratch = new ArrayList<>();
+    private static final Quaternionf CAMERA_ROTATION_SCRATCH = new Quaternionf();
+    private static final Vector3f CAMERA_SPACE_SCRATCH = new Vector3f();
+    private static final double[] PROJECTED_POINT_SCRATCH = new double[2];
+    private static final String ARROW_GLYPH = "▲";
+    private static final Text ARROW_TEXT = Text.literal(ARROW_GLYPH);
+    private static final Text NORTH_TEXT = Text.literal("N");
+    private static final String[] DIRECTIONS = {"남", "남서", "서", "북서", "북", "북동", "동", "남동"};
+    private static final Text[] DIRECTION_TEXTS = {
+            Text.literal("남"), Text.literal("남서"), Text.literal("서"), Text.literal("북서"),
+            Text.literal("북"), Text.literal("북동"), Text.literal("동"), Text.literal("남동")
+    };
+    private static final String[] LOADING_LABELS = {"로딩중.", "로딩중..", "로딩중..."};
+    private static final Text[] LOADING_TEXTS = {
+            Text.literal(LOADING_LABELS[0]), Text.literal(LOADING_LABELS[1]), Text.literal(LOADING_LABELS[2])
+    };
+    private static final double[] WAYPOINT_ZOOM_FACTORS = {
+            Math.pow(1.14, 3), Math.pow(1.14, 2), 1.14, 1.0,
+            1.0 / 1.14, 1.0 / (1.14 * 1.14), 1.0 / Math.pow(1.14, 3), 1.0 / Math.pow(1.14, 4)
+    };
+    private static long cachedCoordinateX = Long.MIN_VALUE;
+    private static long cachedCoordinateZ = Long.MIN_VALUE;
+    private static Text cachedCoordinateText = Text.literal("");
 
     private MinimapHud() {}
 
@@ -83,7 +102,8 @@ public final class MinimapHud {
         int screenHeight = client.getWindow().getScaledHeight();
         Camera camera = client.gameRenderer.getCamera();
         Vec3d cameraPos = PlatformCompat.cameraPosition(camera);
-        Quaternionf inverseCameraRotation = new Quaternionf(camera.getRotation()).conjugate();
+        Quaternionf inverseCameraRotation = CAMERA_ROTATION_SCRATCH
+                .set(camera.getRotation()).conjugate();
         // Zoom mods narrow this well below 1 degree, so only fall back to the menu FOV
         // for genuinely broken values — treating a real zoomed-in FOV as invalid was why
         // markers used to drift toward screen centre (and appear stuck there) while zoomed.
@@ -96,7 +116,8 @@ public final class MinimapHud {
 
         boolean anchoredExistingWaypoint = false;
         for (MinimapConfig.Waypoint waypoint : config.waypoints) {
-            if (!Double.isFinite(waypoint.y)) {
+            if (!Double.isFinite(waypoint.y)
+                    || waypoint.y == MinimapConfig.UNKNOWN_WAYPOINT_Y) {
                 waypoint.y = client.player.getY();
                 anchoredExistingWaypoint = true;
             }
@@ -105,30 +126,43 @@ public final class MinimapHud {
 
         List<MinimapConfig.Waypoint> visible = waypointDistanceScratch;
         visible.clear();
-        visible.addAll(config.waypoints);
-        visible.sort(Comparator.comparingDouble((MinimapConfig.Waypoint waypoint) -> {
-            double dx = waypoint.x - client.player.getX();
-            double dz = waypoint.z - client.player.getZ();
-            return dx * dx + dz * dz;
-        }));
+        double playerX = client.player.getX();
+        double playerZ = client.player.getZ();
+        // Only twelve markers can be drawn. Keep a tiny sorted window instead of
+        // copying and TimSorting the complete waypoint list every rendered frame.
+        for (MinimapConfig.Waypoint waypoint : config.waypoints) {
+            double dx = waypoint.x - playerX;
+            double dz = waypoint.z - playerZ;
+            double distanceSquared = dx * dx + dz * dz;
+            int insertion = 0;
+            while (insertion < visible.size()) {
+                MinimapConfig.Waypoint current = visible.get(insertion);
+                double currentDx = current.x - playerX;
+                double currentDz = current.z - playerZ;
+                if (distanceSquared < currentDx * currentDx + currentDz * currentDz) break;
+                insertion++;
+            }
+            if (insertion >= MAX_HUD_WAYPOINTS) continue;
+            visible.add(insertion, waypoint);
+            if (visible.size() > MAX_HUD_WAYPOINTS) visible.remove(MAX_HUD_WAYPOINTS);
+        }
 
         int drawn = 0;
         for (MinimapConfig.Waypoint waypoint : visible) {
-            if (drawn >= 12) break;
-            double dx = waypoint.x - client.player.getX();
-            double dz = waypoint.z - client.player.getZ();
+            if (drawn >= MAX_HUD_WAYPOINTS) break;
+            double dx = waypoint.x - playerX;
+            double dz = waypoint.z - playerZ;
             double distance = Math.sqrt(dx * dx + dz * dz);
 
-            Vec3d anchor = new Vec3d(waypoint.x, waypoint.y + 1.5, waypoint.z);
-            ScreenPoint anchorPoint = project(anchor, cameraPos, inverseCameraRotation,
-                    focalLength, screenWidth, screenHeight);
-            if (anchorPoint == null) continue;
+            if (!project(waypoint.x, waypoint.y + 1.5, waypoint.z,
+                    cameraPos, inverseCameraRotation, focalLength,
+                    screenWidth, screenHeight, PROJECTED_POINT_SCRATCH)) continue;
 
             int pinSize = MathHelper.clamp(config.waypointSize * 2, 2, 40);
             int fontHeight = client.textRenderer.fontHeight;
-            int x = MathHelper.clamp((int) Math.round(anchorPoint.x),
+            int x = MathHelper.clamp((int) Math.round(PROJECTED_POINT_SCRATCH[0]),
                     pinSize / 2 + 3, screenWidth - pinSize / 2 - 3);
-            int y = MathHelper.clamp((int) Math.round(anchorPoint.y),
+            int y = MathHelper.clamp((int) Math.round(PROJECTED_POINT_SCRATCH[1]),
                     pinSize + 3, screenHeight - fontHeight - 10);
             // The marker is drawn translucent (see WaypointPalette) specifically so that
             // when it lands on the crosshair — this HUD callback runs after vanilla draws
@@ -183,24 +217,22 @@ public final class MinimapHud {
         };
     }
 
-    private static ScreenPoint project(Vec3d worldPos, Vec3d cameraPos,
-                                       Quaternionf inverseCameraRotation, double focalLength,
-                                       int screenWidth, int screenHeight) {
-        Vector3f cameraSpace = new Vector3f(
-                (float) (worldPos.x - cameraPos.x),
-                (float) (worldPos.y - cameraPos.y),
-                (float) (worldPos.z - cameraPos.z));
+    private static boolean project(double worldX, double worldY, double worldZ,
+                                   Vec3d cameraPos, Quaternionf inverseCameraRotation,
+                                   double focalLength, int screenWidth, int screenHeight,
+                                   double[] output) {
+        Vector3f cameraSpace = CAMERA_SPACE_SCRATCH.set(
+                (float) (worldX - cameraPos.x),
+                (float) (worldY - cameraPos.y),
+                (float) (worldZ - cameraPos.z));
         cameraSpace.rotate(inverseCameraRotation);
         // Camera#setRotation builds its forward plane from local +Z. Minecraft's
         // screen-right direction is local -X, hence the minus sign for screen X.
         double forward = cameraSpace.z;
-        if (forward <= 0.05) return null;
-        double screenX = screenWidth * 0.5 - cameraSpace.x * focalLength / forward;
-        double screenY = screenHeight * 0.5 - cameraSpace.y * focalLength / forward;
-        return new ScreenPoint(screenX, screenY, forward);
-    }
-
-    private record ScreenPoint(double x, double y, double depth) {
+        if (forward <= 0.05) return false;
+        output[0] = screenWidth * 0.5 - cameraSpace.x * focalLength / forward;
+        output[1] = screenHeight * 0.5 - cameraSpace.y * focalLength / forward;
+        return true;
     }
 
     public static void drawMap(DrawContext context, int x, int y, int width, int height, boolean editing) {
@@ -244,14 +276,14 @@ public final class MinimapHud {
                     width, height, playerX, playerZ, zoom);
         }
 
-        // The small minimap and the overlay map share one loading indicator. The Void
-        // biome is forced into "incomplete" even when tiles happen to load, since those
-        // tiles belong to whatever real location shares the same X/Z coordinates, not
-        // to this void area — and gets its own distinct visual (the head image) rather
-        // than the generic gray "로딩중" label, since it's a different situation (no
-        // map for this spot at all) than an ordinary in-progress tile fetch.
-        boolean voidBiome = isVoidBiome(client);
-        boolean showLoading = loading.shouldShow(!drewMap || voidBiome);
+        // The small minimap and the overlay map share one loading indicator. Used to
+        // also force this on for the Void biome, back when every non-overworld
+        // dimension shared the overworld's tile coordinate space and could show an
+        // unrelated "loaded-looking" map by coincidence. Now that each dimension
+        // (world, worldpvp, ...) fetches from its own tile namespace, drewMap already
+        // reflects reality correctly — World PvP's void-biome terrain has its own real
+        // map and should just show it, not the loading indicator.
+        boolean showLoading = loading.shouldShow(!drewMap);
 
         if (config.showGrid) {
             drawChunkGrid(context, clampedX, clampedY, width, height,
@@ -269,11 +301,7 @@ public final class MinimapHud {
         }
 
         if (showLoading) {
-            if (voidBiome) {
-                drawHeadFill(context, clampedX, clampedY, width, height);
-            } else {
-                drawLoadingIndicator(context, clampedX, clampedY, width, height);
-            }
+            drawLoadingIndicator(context, clampedX, clampedY, width, height);
         }
 
         if (client.player != null) {
@@ -287,16 +315,17 @@ public final class MinimapHud {
                         client.player.getX(), client.player.getZ(), zoom);
             }
             drawDirectionArrow(context, centerX, centerY, client.player.getYaw());
-            String direction = cardinalDirection(client.player.getYaw());
-            context.drawTextWithShadow(client.textRenderer, Text.literal("N"), centerX - 3,
+            int directionIndex = cardinalDirectionIndex(client.player.getYaw());
+            String direction = DIRECTIONS[directionIndex];
+            context.drawTextWithShadow(client.textRenderer, NORTH_TEXT, centerX - 3,
                     clampedY + 3, 0xFFFFFFFF);
-            context.drawTextWithShadow(client.textRenderer, Text.literal(direction),
+            context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
                     clampedX + width - client.textRenderer.getWidth(direction) - 4,
                     clampedY + 4, 0xFFFFFF55);
             // Hand-formatted instead of String.format: this runs every frame the
             // minimap is on screen, and String.format re-parses its pattern each call.
-            String coords = Math.round(client.player.getX()) + ", " + Math.round(client.player.getZ());
-            context.drawTextWithShadow(client.textRenderer, Text.literal(coords), clampedX + 4,
+            Text coords = coordinateText(client.player.getX(), client.player.getZ());
+            context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
                     clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
         }
 
@@ -308,7 +337,7 @@ public final class MinimapHud {
                                          double centerWorldZ, int zoom) {
         MinimapConfig config = PlanetEarthMinimapClient.config;
         double scale = 4.0 / (1 << MathHelper.clamp(zoom, 0, 7));
-        double zoomFactor = Math.pow(1.14, 3 - MathHelper.clamp(zoom, 0, 7));
+        double zoomFactor = WAYPOINT_ZOOM_FACTORS[MathHelper.clamp(zoom, 0, 7)];
         int size = MathHelper.clamp(
                 (int) Math.round(config.waypointSize * 2 * zoomFactor), 2, 30);
         int centerX = mapX + width / 2;
@@ -361,25 +390,14 @@ public final class MinimapHud {
     private static void drawLoadingIndicator(DrawContext context, int mapX, int mapY, int width, int height) {
         context.fill(mapX, mapY, mapX + width, mapY + height, 0xFF808080);
         MinecraftClient client = MinecraftClient.getInstance();
-        int dotCount = (int) ((System.nanoTime() / 100_000_000L) % 3) + 1;
-        String label = "로딩중" + "...".substring(0, dotCount);
-        int textWidth = client.textRenderer.getWidth(label);
+        int labelIndex = (int) ((System.nanoTime() / 100_000_000L) % 3);
+        Text label = LOADING_TEXTS[labelIndex];
+        int textWidth = client.textRenderer.getWidth(LOADING_LABELS[labelIndex]);
         int fontHeight = client.textRenderer.fontHeight;
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
-        context.drawTextWithShadow(client.textRenderer, Text.literal(label),
+        context.drawTextWithShadow(client.textRenderer, label,
                 centerX - textWidth / 2, centerY - fontHeight / 2, 0xFFFFFFFF);
-    }
-
-    /** The Void biome's distinct loading visual: no gradient, just the head image
-     *  stretched to exactly fill the box on both axes independently, so it always
-     *  matches whatever aspect ratio the box currently has instead of a fixed crop. */
-    private static void drawHeadFill(DrawContext context, int mapX, int mapY, int width, int height) {
-        PlatformCompat.push(context);
-        PlatformCompat.translate(context, (float) mapX, (float) mapY);
-        PlatformCompat.scale(context, width / 600.0f, height / 600.0f);
-        PlatformCompat.drawTexture(context, LOADING_HEAD, 0, 0, 0, 0, 600, 600, 600, 600);
-        PlatformCompat.pop(context);
     }
 
     /** Draws lines on real Minecraft chunk borders (world X/Z multiples of 16). */
@@ -456,26 +474,39 @@ public final class MinimapHud {
 
     private static void drawDirectionArrow(DrawContext context, int x, int y, float yaw) {
         MinecraftClient client = MinecraftClient.getInstance();
-        String arrow = "▲";
         float markerScale = PlanetEarthMinimapClient.config.selfMarkerSize / 9.0f;
-        int arrowX = -client.textRenderer.getWidth(arrow) / 2;
+        int arrowX = -client.textRenderer.getWidth(ARROW_GLYPH) / 2;
         int arrowY = -client.textRenderer.fontHeight / 2;
         PlatformCompat.push(context);
         PlatformCompat.translate(context, x, y);
         PlatformCompat.rotate(context, yaw + 180.0f);
         PlatformCompat.scale(context, markerScale, markerScale);
-        Text arrowText = Text.literal(arrow);
-        context.drawText(client.textRenderer, arrowText, arrowX - 1, arrowY, 0xFF000000, false);
-        context.drawText(client.textRenderer, arrowText, arrowX + 1, arrowY, 0xFF000000, false);
-        context.drawText(client.textRenderer, arrowText, arrowX, arrowY - 1, 0xFF000000, false);
-        context.drawText(client.textRenderer, arrowText, arrowX, arrowY + 1, 0xFF000000, false);
-        context.drawText(client.textRenderer, arrowText, arrowX, arrowY, 0xFFFFFFFF, false);
+        context.drawText(client.textRenderer, ARROW_TEXT, arrowX - 1, arrowY, 0xFF000000, false);
+        context.drawText(client.textRenderer, ARROW_TEXT, arrowX + 1, arrowY, 0xFF000000, false);
+        context.drawText(client.textRenderer, ARROW_TEXT, arrowX, arrowY - 1, 0xFF000000, false);
+        context.drawText(client.textRenderer, ARROW_TEXT, arrowX, arrowY + 1, 0xFF000000, false);
+        context.drawText(client.textRenderer, ARROW_TEXT, arrowX, arrowY, 0xFFFFFFFF, false);
         PlatformCompat.pop(context);
+    }
+
+    private static Text coordinateText(double x, double z) {
+        long roundedX = Math.round(x);
+        long roundedZ = Math.round(z);
+        if (roundedX != cachedCoordinateX || roundedZ != cachedCoordinateZ) {
+            cachedCoordinateX = roundedX;
+            cachedCoordinateZ = roundedZ;
+            cachedCoordinateText = Text.literal(roundedX + ", " + roundedZ);
+        }
+        return cachedCoordinateText;
     }
 
     private static final java.time.ZoneId KOREA_ZONE = java.time.ZoneId.of("Asia/Seoul");
     private static String cachedBiomeName = "";
-    private static long biomeComputedAt;
+    private static Object cachedBiomeWorld;
+    private static long cachedBiomeBlockPos = Long.MIN_VALUE;
+    private static long cachedStatusSecond = Long.MIN_VALUE;
+    private static String cachedStatusText = "";
+    private static Text cachedStatusTextComponent = Text.literal("");
 
     /** "평원 · 오후 3시 30분 45초" style small status text — biome name plus the real
      *  Korea-time clock (not the in-game day/night cycle). The biome half is cached and
@@ -483,36 +514,34 @@ public final class MinimapHud {
      *  comparatively expensive and the biome rarely changes frame to frame; the clock
      *  half is cheap to format and is recomputed every call so the seconds stay live. */
     private static String biomeAndClockText(MinecraftClient client) {
-        long now = System.nanoTime();
-        if (cachedBiomeName.isEmpty() || now - biomeComputedAt >= 500_000_000L) {
-            String fresh = currentBiomeName(client);
-            if (!fresh.isEmpty()) {
-                cachedBiomeName = fresh;
-                biomeComputedAt = now;
-            }
-        }
+        refreshBiomeCache(client);
+        long second = System.currentTimeMillis() / 1_000L;
+        if (second == cachedStatusSecond && !cachedStatusText.isEmpty()) return cachedStatusText;
         String clock = currentClockText();
-        return cachedBiomeName.isEmpty() ? clock : cachedBiomeName + " · " + clock;
+        cachedStatusText = cachedBiomeName.isEmpty() ? clock : cachedBiomeName + " · " + clock;
+        cachedStatusTextComponent = Text.literal(cachedStatusText);
+        cachedStatusSecond = second;
+        return cachedStatusText;
     }
 
-    private static String currentBiomeName(MinecraftClient client) {
-        if (client.player == null || client.world == null) return "";
+    private static void refreshBiomeCache(MinecraftClient client) {
+        if (client.player == null || client.world == null) {
+            cachedBiomeWorld = null;
+            cachedBiomeBlockPos = Long.MIN_VALUE;
+            cachedBiomeName = "";
+            cachedStatusSecond = Long.MIN_VALUE;
+            return;
+        }
+        long blockPos = client.player.getBlockPos().asLong();
+        if (cachedBiomeWorld == client.world && cachedBiomeBlockPos == blockPos) return;
         RegistryEntry<Biome> biome = client.world.getBiome(client.player.getBlockPos());
-        return biome.getKey()
+        cachedBiomeWorld = client.world;
+        cachedBiomeBlockPos = blockPos;
+        cachedBiomeName = biome.getKey()
                 .map(key -> Text.translatable("biome." + key.getValue().getNamespace()
                         + "." + key.getValue().getPath()).getString())
                 .orElse("");
-    }
-
-    /** True in the "공허" (Void) biome — an area with no real terrain, where the map
-     *  API can still coincidentally have tile data for whatever X/Z the player happens
-     *  to be standing on (same class of bug as the Nether coordinate mismatch), showing
-     *  an unrelated "working" map instead of the loading indicator. Checked by the raw
-     *  biome key rather than the translated name so it doesn't depend on locale. */
-    private static boolean isVoidBiome(MinecraftClient client) {
-        if (client.player == null || client.world == null) return false;
-        RegistryEntry<Biome> biome = client.world.getBiome(client.player.getBlockPos());
-        return biome.getKey().map(key -> "the_void".equals(key.getValue().getPath())).orElse(false);
+        cachedStatusSecond = Long.MIN_VALUE;
     }
 
     /** Real Korea-time (Asia/Seoul) clock as a 12-hour readout with seconds, e.g.
@@ -584,7 +613,7 @@ public final class MinimapHud {
             // At the default 100% there is nothing to scale, so skip the matrix path
             // below entirely: routing the bitmap font through even an identity-ish
             // scale transform made it come out soft/doubled-looking instead of crisp.
-            context.drawTextWithShadow(client.textRenderer, Text.literal(text),
+            context.drawTextWithShadow(client.textRenderer, cachedStatusTextComponent,
                     x + 5, y + (height - client.textRenderer.fontHeight) / 2, 0xFFFFFFFF);
             return;
         }
@@ -592,12 +621,11 @@ public final class MinimapHud {
         PlatformCompat.translate(context, Math.round(x + 5 * scale),
                 Math.round(y + (height - client.textRenderer.fontHeight * scale) / 2f));
         PlatformCompat.scale(context, scale, scale);
-        context.drawTextWithShadow(client.textRenderer, Text.literal(text), 0, 0, 0xFFFFFFFF);
+        context.drawTextWithShadow(client.textRenderer, cachedStatusTextComponent, 0, 0, 0xFFFFFFFF);
         PlatformCompat.pop(context);
     }
 
-    private static String cardinalDirection(float yaw) {
-        String[] directions = {"남", "남서", "서", "북서", "북", "북동", "동", "남동"};
-        return directions[Math.floorMod(Math.round(yaw / 45.0f), 8)];
+    private static int cardinalDirectionIndex(float yaw) {
+        return Math.floorMod(Math.round(yaw / 45.0f), DIRECTIONS.length);
     }
 }

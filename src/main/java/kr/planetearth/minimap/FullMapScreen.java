@@ -168,7 +168,6 @@ abstract class FullMapScreenBase extends Screen {
         addDrawableChild(new IntSlider(panelX, y, controlWidth,
                 "사이트 마커 크기", 6, 24, config.siteMarkerSize, value -> {
             config.siteMarkerSize = value;
-            config.save();
         }));
         y += 30;
 
@@ -184,7 +183,6 @@ abstract class FullMapScreenBase extends Screen {
         addDrawableChild(new IntSlider(panelX, y, controlWidth,
                 "이름 표시 크기", 25, 200, config.showMapLabelScalePercent, value -> {
             config.showMapLabelScalePercent = value;
-            config.save();
         }));
         y += 22;
 
@@ -203,13 +201,11 @@ abstract class FullMapScreenBase extends Screen {
         addDrawableChild(new IntSlider(panelX, y, controlWidth,
                 "웨이포인트 크기", 1, 24, config.waypointSize, value -> {
             config.waypointSize = value;
-            config.save();
         }));
         y += 22;
         addDrawableChild(new IntSlider(panelX, y, controlWidth,
                 "웨이포인트 글씨 크기", 25, 150, config.waypointLabelScalePercent, value -> {
             config.waypointLabelScalePercent = value;
-            config.save();
         }));
         y += 22;
         addDrawableChild(ButtonWidget.builder(waypointLabelModeText(config), pressed -> {
@@ -1133,7 +1129,7 @@ abstract class FullMapScreenBase extends Screen {
                 : name.trim();
         double anchorY = client != null && client.player != null
                 ? client.player.getY()
-                : Double.NaN;
+                : MinimapConfig.UNKNOWN_WAYPOINT_Y;
         PlanetEarthMinimapClient.config.waypoints.add(
                 new MinimapConfig.Waypoint(finalName, x, anchorY, z, color, shape));
         PlanetEarthMinimapClient.config.save();
