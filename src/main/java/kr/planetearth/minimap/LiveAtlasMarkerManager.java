@@ -17,6 +17,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -309,7 +310,7 @@ public final class LiveAtlasMarkerManager {
             }
             batch = new AreaRenderCache(snapshot, Set.copyOf(enabledCategories), mapX, mapY,
                     width, height, centerWorldX, centerWorldZ, scale,
-                    List.copyOf(rectangles), List.copyOf(uniqueOutlines),
+                    List.copyOf(rectangles), mergeOutlineSegments(uniqueOutlines),
                     List.copyOf(diagonalOutlines));
             cacheAreaBatch(batch);
         }
@@ -363,6 +364,59 @@ public final class LiveAtlasMarkerManager {
         if (Math.max(x1, x2) < minX || Math.min(x1, x2) > maxX
                 || Math.max(y1, y2) < minY || Math.min(y1, y2) > maxY) return;
         diagonalLines.add(new ColoredLine(x1, y1, x2, y2, color));
+    }
+
+    /** Border outlines start as one 1px rectangle per chunk edge (16 blocks), so a long
+     *  straight town border spanning many chunks used to become one draw call per
+     *  chunk. Merging same-row/same-column, same-colour, touching segments into fewer,
+     *  wider rectangles collapses that back down to one draw call per straight run —
+     *  a real GPU draw-call cost on weaker hardware, same idea as the fill merging above. */
+    private static List<ColoredRectangle> mergeOutlineSegments(Collection<ColoredRectangle> segments) {
+        Map<Long, List<ColoredRectangle>> horizontalRows = new HashMap<>();
+        Map<Long, List<ColoredRectangle>> verticalColumns = new HashMap<>();
+        List<ColoredRectangle> merged = new ArrayList<>();
+        for (ColoredRectangle rect : segments) {
+            if (rect.bottom - rect.top == 1) {
+                long key = ((long) rect.top << 32) ^ (rect.color & 0xFFFFFFFFL);
+                horizontalRows.computeIfAbsent(key, ignored -> new ArrayList<>()).add(rect);
+            } else {
+                long key = ((long) rect.left << 32) ^ (rect.color & 0xFFFFFFFFL);
+                verticalColumns.computeIfAbsent(key, ignored -> new ArrayList<>()).add(rect);
+            }
+        }
+        for (List<ColoredRectangle> row : horizontalRows.values()) {
+            row.sort(Comparator.comparingInt(r -> r.left));
+            int start = row.get(0).left;
+            int end = row.get(0).right;
+            for (int i = 1; i < row.size(); i++) {
+                ColoredRectangle r = row.get(i);
+                if (r.left <= end) {
+                    end = Math.max(end, r.right);
+                } else {
+                    merged.add(new ColoredRectangle(start, row.get(0).top, end, row.get(0).bottom, row.get(0).color));
+                    start = r.left;
+                    end = r.right;
+                }
+            }
+            merged.add(new ColoredRectangle(start, row.get(0).top, end, row.get(0).bottom, row.get(0).color));
+        }
+        for (List<ColoredRectangle> column : verticalColumns.values()) {
+            column.sort(Comparator.comparingInt(r -> r.top));
+            int start = column.get(0).top;
+            int end = column.get(0).bottom;
+            for (int i = 1; i < column.size(); i++) {
+                ColoredRectangle r = column.get(i);
+                if (r.top <= end) {
+                    end = Math.max(end, r.bottom);
+                } else {
+                    merged.add(new ColoredRectangle(column.get(0).left, start, column.get(0).right, end, column.get(0).color));
+                    start = r.top;
+                    end = r.bottom;
+                }
+            }
+            merged.add(new ColoredRectangle(column.get(0).left, start, column.get(0).right, end, column.get(0).color));
+        }
+        return merged;
     }
 
     private static AreaRenderCache findAreaCache(

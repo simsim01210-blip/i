@@ -153,12 +153,15 @@ public final class MinimapHud {
         }
     }
 
-    /** "820m" under 1000m, "1.2km" from 1000m up. */
+    /** "820m" under 1000m, "1.2km" from 1000m up. Formatted by hand instead of
+     *  String.format — this runs once per visible waypoint every single frame, and
+     *  String.format re-parses its format string on every call. */
     private static String formatWaypointDistance(double distance) {
         if (distance < 1000.0) {
             return Math.round(distance) + "m";
         }
-        return String.format("%.1fkm", distance / 1000.0);
+        long tenths = Math.round(distance / 100.0);
+        return (tenths / 10) + "." + (tenths % 10) + "km";
     }
 
     /** Null means the label is switched off entirely ("none") — the marker icon still
@@ -283,7 +286,9 @@ public final class MinimapHud {
             context.drawTextWithShadow(client.textRenderer, Text.literal(direction),
                     clampedX + width - client.textRenderer.getWidth(direction) - 4,
                     clampedY + 4, 0xFFFFFF55);
-            String coords = String.format("%.0f, %.0f", client.player.getX(), client.player.getZ());
+            // Hand-formatted instead of String.format: this runs every frame the
+            // minimap is on screen, and String.format re-parses its pattern each call.
+            String coords = Math.round(client.player.getX()) + ", " + Math.round(client.player.getZ());
             context.drawTextWithShadow(client.textRenderer, Text.literal(coords), clampedX + 4,
                     clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
         }
@@ -514,7 +519,19 @@ public final class MinimapHud {
         String period = hour24 < 12 ? "오전" : "오후";
         int hour12 = hour24 % 12;
         if (hour12 == 0) hour12 = 12;
-        return String.format("%s %d시 %02d분 %02d초", period, hour12, minute, second);
+        // Hand-formatted instead of String.format: the clock is deliberately
+        // recomputed every single call (see biomeAndClockText) so the seconds stay
+        // live, and String.format re-parses its pattern string on every call.
+        StringBuilder text = new StringBuilder(16);
+        text.append(period).append(' ').append(hour12).append("시 ");
+        appendTwoDigits(text, minute).append("분 ");
+        appendTwoDigits(text, second).append("초");
+        return text.toString();
+    }
+
+    private static StringBuilder appendTwoDigits(StringBuilder text, int value) {
+        if (value < 10) text.append('0');
+        return text.append(value);
     }
 
     private static void drawStatusBarOnHud(DrawContext context, MinecraftClient client, MinimapConfig config) {
