@@ -62,6 +62,13 @@ public final class MinimapHud {
         }
         overlayMapWasHeld = overlayHeld;
 
+        // While the overlay is up it already shows a much bigger view of essentially
+        // the same area, usually at a different zoom — so drawing the small corner
+        // minimap underneath at the same time meant fetching, decoding and drawing two
+        // separate sets of map tiles every frame instead of one. Skipping the redundant
+        // one while the overlay covers it anyway is a real, easy win.
+        if (overlayHeld) return;
+
         if (!config.enabled) return;
         drawMap(context, config.x, config.y, config.width, config.height, false);
     }
