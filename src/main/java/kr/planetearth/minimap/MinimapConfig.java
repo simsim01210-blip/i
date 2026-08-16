@@ -66,7 +66,7 @@ public final class MinimapConfig {
     /** Persistent site marker name labels (기차역/특산품/항구/... and, on the full map
      *  screen only, town flags) next to each icon — instead of only showing on hover.
      *  Shown on the corner minimap and the overlay map too, not just the full map screen. */
-    public boolean showMarkerLabels = true;
+    public boolean showMarkerLabels = false;
     /** Persistent country/town name labels centred in each coloured territory —
      *  independent of showMarkerLabels, since one clutters the whole map with big
      *  land-area names and the other just labels individual points. */

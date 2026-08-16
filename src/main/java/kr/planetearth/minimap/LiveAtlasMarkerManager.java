@@ -104,9 +104,11 @@ public final class LiveAtlasMarkerManager {
     public static List<MarkerEntry> markerEntries(String category) {
         MarkerCategory data = markerData.get(category);
         if (data == null) return List.of();
+        boolean inWorldPvp = "worldpvp".equals(
+                LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance()));
         List<MarkerEntry> entries = new ArrayList<>(data.markers.size());
         for (MapMarker marker : data.markers) {
-            entries.add(new MarkerEntry(marker.label, marker.x, marker.z));
+            entries.add(new MarkerEntry(displayLabel(marker.label, inWorldPvp), marker.x, marker.z));
         }
         return List.copyOf(entries);
     }
@@ -158,6 +160,11 @@ public final class LiveAtlasMarkerManager {
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
         MapMarker hovered = null;
+        // World PvP's markers are just bare numbers ("4"), which only means something
+        // as "4번 포탈" — and its markers are always worth labelling regardless of the
+        // general marker-label setting, since there's no other way to tell them apart.
+        boolean inWorldPvp = "worldpvp".equals(
+                LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance()));
 
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         try {
@@ -211,8 +218,8 @@ public final class LiveAtlasMarkerManager {
                             markerOccupancy[bucket] = true;
                         }
                         drawIcon(context, marker.icon, x, y, markerSize);
-                        if (PlanetEarthMinimapClient.config.showMarkerLabels) {
-                            drawMarkerLabel(context, marker.label, x, y, markerSize);
+                        if (PlanetEarthMinimapClient.config.showMarkerLabels || inWorldPvp) {
+                            drawMarkerLabel(context, displayLabel(marker.label, inWorldPvp), x, y, markerSize);
                         }
                         if (Math.abs(mouseX - x) <= hitRadius && Math.abs(mouseY - y) <= hitRadius) hovered = marker;
                     }
@@ -224,7 +231,7 @@ public final class LiveAtlasMarkerManager {
 
         if (hovered != null) {
             MinecraftClient client = MinecraftClient.getInstance();
-            String label = hovered.label;
+            String label = displayLabel(hovered.label, inWorldPvp);
             int textWidth = client.textRenderer.getWidth(label);
             int tx = Math.min(mouseX + 10, mapX + width - textWidth - 6);
             int ty = Math.max(mapY + 4, mouseY - 12);
@@ -667,6 +674,16 @@ public final class LiveAtlasMarkerManager {
         PlatformCompat.scale(context, scale, scale);
         context.drawTextWithShadow(client.textRenderer, text, 0, 0, 0xFFFFFFFF);
         PlatformCompat.pop(context);
+    }
+
+    /** World PvP's own markers are labelled with a bare number ("4"), which only reads
+     *  as "4번 포탈" — everywhere else a marker's label is shown as-is. */
+    private static String displayLabel(String rawLabel, boolean inWorldPvp) {
+        if (inWorldPvp && rawLabel != null && !rawLabel.isEmpty()
+                && rawLabel.chars().allMatch(Character::isDigit)) {
+            return rawLabel + "번 포탈";
+        }
+        return rawLabel;
     }
 
     /** One persistent name label per marker instead of only on hover — placed just
