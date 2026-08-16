@@ -163,7 +163,7 @@ public final class LiveAtlasMarkerManager {
         try {
             renderAreas(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
                     pixelsPerBlock, enabledCategories);
-            if (PlanetEarthMinimapClient.config.showMapLabels) {
+            if (PlanetEarthMinimapClient.config.showAreaLabels) {
                 drawAreaLabels(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
                         pixelsPerBlock, enabledCategories);
             }
@@ -211,7 +211,7 @@ public final class LiveAtlasMarkerManager {
                             markerOccupancy[bucket] = true;
                         }
                         drawIcon(context, marker.icon, x, y, markerSize);
-                        if (PlanetEarthMinimapClient.config.showMapLabels) {
+                        if (PlanetEarthMinimapClient.config.showMarkerLabels) {
                             drawMarkerLabel(context, marker.label, x, y, markerSize);
                         }
                         if (Math.abs(mouseX - x) <= hitRadius && Math.abs(mouseY - y) <= hitRadius) hovered = marker;
@@ -244,7 +244,7 @@ public final class LiveAtlasMarkerManager {
         try {
             renderAreas(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
                     pixelsPerBlock, CATEGORIES.keySet());
-            if (PlanetEarthMinimapClient.config.showMapLabels) {
+            if (PlanetEarthMinimapClient.config.showAreaLabels) {
                 drawAreaLabels(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
                         pixelsPerBlock, CATEGORIES.keySet());
             }

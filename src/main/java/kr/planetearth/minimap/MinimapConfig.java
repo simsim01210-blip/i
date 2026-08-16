@@ -63,11 +63,14 @@ public final class MinimapConfig {
      *  the viewport, and shrinks the tile download/decode thread pool. See
      *  {@link PlanetEarthMinimapClient#applyLowSpecMode} for where it's applied. */
     public boolean lowSpecMode = false;
-    /** Persistent name labels — the country/town name centred in each coloured
-     *  territory, and (on the full map screen only) each site marker's own name next
-     *  to its icon — instead of only showing on hover. Shown on the corner minimap and
-     *  the overlay map too, not just the full map screen. */
-    public boolean showMapLabels = true;
+    /** Persistent site marker name labels (기차역/특산품/항구/... and, on the full map
+     *  screen only, town flags) next to each icon — instead of only showing on hover.
+     *  Shown on the corner minimap and the overlay map too, not just the full map screen. */
+    public boolean showMarkerLabels = true;
+    /** Persistent country/town name labels centred in each coloured territory —
+     *  independent of showMarkerLabels, since one clutters the whole map with big
+     *  land-area names and the other just labels individual points. */
+    public boolean showAreaLabels = false;
     public int showMapLabelScalePercent = 100;
 
     public static MinimapConfig load() {
