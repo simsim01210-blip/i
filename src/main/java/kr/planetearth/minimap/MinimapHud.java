@@ -46,6 +46,7 @@ public final class MinimapHud {
             1.0 / 1.14, 1.0 / (1.14 * 1.14), 1.0 / Math.pow(1.14, 3), 1.0 / Math.pow(1.14, 4)
     };
     private static long cachedCoordinateX = Long.MIN_VALUE;
+    private static long cachedCoordinateY = Long.MIN_VALUE;
     private static long cachedCoordinateZ = Long.MIN_VALUE;
     private static Text cachedCoordinateText = Text.literal("");
 
@@ -324,7 +325,7 @@ public final class MinimapHud {
                     clampedY + 4, 0xFFFFFF55);
             // Hand-formatted instead of String.format: this runs every frame the
             // minimap is on screen, and String.format re-parses its pattern each call.
-            Text coords = coordinateText(client.player.getX(), client.player.getZ());
+            Text coords = coordinateText(client.player.getX(), client.player.getY(), client.player.getZ());
             context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
                     clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
         }
@@ -489,13 +490,15 @@ public final class MinimapHud {
         PlatformCompat.pop(context);
     }
 
-    private static Text coordinateText(double x, double z) {
+    private static Text coordinateText(double x, double y, double z) {
         long roundedX = Math.round(x);
+        long roundedY = Math.round(y);
         long roundedZ = Math.round(z);
-        if (roundedX != cachedCoordinateX || roundedZ != cachedCoordinateZ) {
+        if (roundedX != cachedCoordinateX || roundedY != cachedCoordinateY || roundedZ != cachedCoordinateZ) {
             cachedCoordinateX = roundedX;
+            cachedCoordinateY = roundedY;
             cachedCoordinateZ = roundedZ;
-            cachedCoordinateText = Text.literal(roundedX + ", " + roundedZ);
+            cachedCoordinateText = Text.literal(roundedX + ", " + roundedY + ", " + roundedZ);
         }
         return cachedCoordinateText;
     }
