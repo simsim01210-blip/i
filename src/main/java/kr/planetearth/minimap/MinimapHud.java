@@ -280,7 +280,11 @@ public final class MinimapHud {
         int clampedX = MathHelper.clamp(x, 0, Math.max(0, client.getWindow().getScaledWidth() - width));
         int clampedY = MathHelper.clamp(y, 0, Math.max(0, client.getWindow().getScaledHeight() - height));
 
-        drawHotbarFrame(context, clampedX, clampedY, width, height);
+        if (config.circularShape) {
+            drawCircularFrame(context, clampedX, clampedY, width, height);
+        } else {
+            drawHotbarFrame(context, clampedX, clampedY, width, height);
+        }
         context.fill(clampedX, clampedY, clampedX + width, clampedY + height, backgroundColor);
 
         double playerX = client.player == null ? 0 : client.player.getX();
@@ -424,29 +428,53 @@ public final class MinimapHud {
         if (editing) drawResizeHandles(context, clampedX, clampedY, width, height);
     }
 
-    private static final int CIRCULAR_MASK_STEPS = 10;
+    /** Round counterpart to {@link #drawHotbarFrame} — nested filled circles standing
+     *  in for the square version's nested rectangles, biggest/darkest first so each
+     *  smaller, lighter ring is drawn on top of it. Purely for the border; the map
+     *  content circle itself is still cut from the ordinary square render afterwards
+     *  by {@link #drawCircularCornerMask}. */
+    private static void drawCircularFrame(DrawContext context, int mapX, int mapY, int width, int height) {
+        int radius = Math.min(width, height) / 2;
+        if (radius <= 0) return;
+        int centerX = mapX + width / 2;
+        int centerY = mapY + height / 2;
+        drawFilledCircle(context, centerX, centerY, radius + 4, 0xF0101010);
+        drawFilledCircle(context, centerX, centerY, radius + 2, 0xFF8B8B8B);
+        drawFilledCircle(context, centerX, centerY, radius + 1, 0xFF555555);
+    }
+
+    private static void drawFilledCircle(DrawContext context, int centerX, int centerY, int radius, int color) {
+        for (int row = -radius; row <= radius; row++) {
+            double inside = (double) radius * radius - (double) row * row;
+            if (inside < 0) continue;
+            int halfWidth = (int) Math.round(Math.sqrt(inside));
+            context.fill(centerX - halfWidth, centerY + row, centerX + halfWidth, centerY + row + 1, color);
+        }
+    }
 
     private static void drawCircularCornerMask(DrawContext context, int mapX, int mapY,
                                                 int width, int height, int color) {
         int radius = Math.min(width, height) / 2;
+        if (radius <= 0) return;
         int centerY = mapY + height / 2;
-        for (int step = 0; step < CIRCULAR_MASK_STEPS; step++) {
-            int rowTop = step * radius / CIRCULAR_MASK_STEPS;
-            int rowBottom = (step + 1) * radius / CIRCULAR_MASK_STEPS;
-            // Uses the band's inner (closer-to-centre) edge so the mask only ever
-            // trims outside the circle and never bites into it.
-            double distanceFromCenter = radius - rowTop;
+        // One masking band per screen row (not a coarse fixed step count) so the cut
+        // reads as an actual smooth circle instead of a visible staircase — still
+        // nothing but plain context.fill() calls in a single solid colour, which
+        // DrawContext already coalesces into a handful of real GPU draws the same way
+        // it already batches the area-overlay's own dense fills, so the extra
+        // resolution doesn't scale render cost the way redrawing map content per band
+        // would have.
+        for (int row = 0; row < radius; row++) {
+            double distanceFromCenter = radius - row;
             double insideSquared = (double) radius * radius - distanceFromCenter * distanceFromCenter;
-            int cut = insideSquared > 0 ? radius - (int) Math.sqrt(insideSquared) : radius;
+            int cut = insideSquared > 0 ? radius - (int) Math.ceil(Math.sqrt(insideSquared)) : radius;
             if (cut <= 0) continue;
-            int topRowStart = centerY - radius + rowTop;
-            int topRowEnd = centerY - radius + rowBottom;
-            context.fill(mapX, topRowStart, mapX + cut, topRowEnd, color);
-            context.fill(mapX + width - cut, topRowStart, mapX + width, topRowEnd, color);
-            int bottomRowStart = mapY + height - rowBottom;
-            int bottomRowEnd = mapY + height - rowTop;
-            context.fill(mapX, bottomRowStart, mapX + cut, bottomRowEnd, color);
-            context.fill(mapX + width - cut, bottomRowStart, mapX + width, bottomRowEnd, color);
+            int topY = centerY - radius + row;
+            context.fill(mapX, topY, mapX + cut, topY + 1, color);
+            context.fill(mapX + width - cut, topY, mapX + width, topY + 1, color);
+            int bottomY = mapY + height - row - 1;
+            context.fill(mapX, bottomY, mapX + cut, bottomY + 1, color);
+            context.fill(mapX + width - cut, bottomY, mapX + width, bottomY + 1, color);
         }
     }
 
