@@ -494,7 +494,7 @@ abstract class FullMapScreenBase extends Screen {
                 centerWorldX, centerWorldZ, zoom, enabledCategories, mouseX, mouseY);
         if (PlanetEarthMinimapClient.config.showPlayers) {
             LiveAtlasPlayerManager.render(context, 0, 0, mapWidth, height,
-                    centerWorldX, centerWorldZ, zoom);
+                    centerWorldX, centerWorldZ, zoom, 0f);
         }
         drawWaypoints(context, mapWidth);
         NavigationManager.renderOnFullMap(context, 0, 0, mapWidth, height,

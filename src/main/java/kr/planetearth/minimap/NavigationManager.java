@@ -139,13 +139,20 @@ public final class NavigationManager {
 
     public static void renderOnMinimap(DrawContext context, int mapX, int mapY,
                                         int width, int height, double playerX,
-                                        double playerZ, int zoom) {
+                                        double playerZ, int zoom, float rotationDegrees) {
         Target active = currentTarget();
         if (active == null) return;
         boolean showingVia = !viaPoints.isEmpty();
         double scale = 4.0 / (1 << Math.max(0, Math.min(zoom, 7)));
-        double pixelX = (active.x - playerX) * scale;
-        double pixelY = (active.z - playerZ) * scale;
+        // Rotated up front so everything below — the dotted line, the target marker,
+        // and its distance label — all follow the map's spin as one already-rotated
+        // offset, the same way the other per-item renderers do it, while the label
+        // text itself is still drawn with no active rotation so it stays upright.
+        double[] rotatedOffset = new double[2];
+        MinimapHud.rotateOffset((active.x - playerX) * scale, (active.z - playerZ) * scale,
+                rotationDegrees, rotatedOffset);
+        double pixelX = rotatedOffset[0];
+        double pixelY = rotatedOffset[1];
         double fullLength = Math.sqrt(pixelX * pixelX + pixelY * pixelY);
         if (fullLength < 0.001) return;
 

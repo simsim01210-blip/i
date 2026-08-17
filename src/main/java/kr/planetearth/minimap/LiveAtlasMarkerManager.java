@@ -182,7 +182,7 @@ public final class LiveAtlasMarkerManager {
                     pixelsPerBlock, enabledCategories);
             if (PlanetEarthMinimapClient.config.showAreaLabels) {
                 drawAreaLabels(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
-                        pixelsPerBlock, enabledCategories);
+                        pixelsPerBlock, enabledCategories, 0f);
             }
             if (PlanetEarthMinimapClient.config.showSiteMarkers) {
                 hovered = drawSiteMarkers(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
@@ -209,22 +209,36 @@ public final class LiveAtlasMarkerManager {
      *  or names at all before, only territory colour. */
     public static void renderAreaOverlay(DrawContext context, int mapX, int mapY,
                                          int width, int height, double centerWorldX,
-                                         double centerWorldZ, int zoom) {
+                                         double centerWorldZ, int zoom, float rotationDegrees) {
         refreshIfNeeded();
         double pixelsPerBlock = 4.0 / (1 << Math.max(0, Math.min(zoom, 7)));
         boolean inWorldPvp = "worldpvp".equals(
                 LiveAtlasTileManager.currentDynmapWorld(MinecraftClient.getInstance()));
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         try {
+            // Territory fills/outlines have no text of their own, so — unlike the
+            // labels and markers below — they're fine to rotate as a block through the
+            // matrix stack, exactly like the tile mosaic underneath them, so their
+            // borders stay aligned with the rotated terrain.
+            PlatformCompat.push(context);
+            if (rotationDegrees != 0f) {
+                int centerX = mapX + width / 2;
+                int centerY = mapY + height / 2;
+                PlatformCompat.translate(context, centerX, centerY);
+                PlatformCompat.rotate(context, rotationDegrees);
+                PlatformCompat.translate(context, -centerX, -centerY);
+            }
             renderAreas(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
                     pixelsPerBlock, CATEGORIES.keySet());
+            PlatformCompat.pop(context);
+
             if (PlanetEarthMinimapClient.config.showAreaLabels) {
                 drawAreaLabels(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
-                        pixelsPerBlock, CATEGORIES.keySet());
+                        pixelsPerBlock, CATEGORIES.keySet(), rotationDegrees);
             }
             if (PlanetEarthMinimapClient.config.showSiteMarkers) {
                 drawSiteMarkersCached(context, mapX, mapY, width, height, centerWorldX, centerWorldZ,
-                        pixelsPerBlock, zoom, CATEGORIES.keySet(), inWorldPvp);
+                        pixelsPerBlock, zoom, CATEGORIES.keySet(), inWorldPvp, rotationDegrees);
             }
         } finally {
             context.disableScissor();
@@ -304,7 +318,8 @@ public final class LiveAtlasMarkerManager {
      *  screen the underlying scan was originally written for. */
     private static void drawSiteMarkersCached(DrawContext context, int mapX, int mapY, int width, int height,
                                               double centerWorldX, double centerWorldZ, double pixelsPerBlock,
-                                              int zoom, Set<String> enabledCategories, boolean inWorldPvp) {
+                                              int zoom, Set<String> enabledCategories, boolean inWorldPvp,
+                                              float rotationDegrees) {
         int markerSize = displayMarkerSize(zoom);
         int cacheMargin = areaCacheMargin(width, height);
         Map<String, MarkerCategory> snapshot = markerData;
@@ -340,9 +355,15 @@ public final class LiveAtlasMarkerManager {
 
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
+        double[] rotated = new double[2];
         for (MarkerDrawEntry entry : batch.entries) {
-            int x = centerX + (int) Math.round((entry.worldX - centerWorldX) * pixelsPerBlock);
-            int y = centerY + (int) Math.round((entry.worldZ - centerWorldZ) * pixelsPerBlock);
+            // Same treatment as the area labels above: the icon's position rotates
+            // with the map, but it and its label are drawn with no active rotation so
+            // the icon and its name both stay upright and readable.
+            MinimapHud.rotateOffset((entry.worldX - centerWorldX) * pixelsPerBlock,
+                    (entry.worldZ - centerWorldZ) * pixelsPerBlock, rotationDegrees, rotated);
+            int x = centerX + (int) Math.round(rotated[0]);
+            int y = centerY + (int) Math.round(rotated[1]);
             if (x < mapX - markerSize || x > mapX + width + markerSize
                     || y < mapY - markerSize || y > mapY + height + markerSize) continue;
             drawIcon(context, entry.icon, x, y, markerSize);
@@ -858,7 +879,7 @@ public final class LiveAtlasMarkerManager {
      *  the country name (if LiveAtlas provided one) or the area's own label otherwise. */
     private static void drawAreaLabels(DrawContext context, int mapX, int mapY, int width, int height,
                                        double centerWorldX, double centerWorldZ, double scale,
-                                       Set<String> enabledCategories) {
+                                       Set<String> enabledCategories, float rotationDegrees) {
         MinecraftClient client = MinecraftClient.getInstance();
         float textScale = labelScale();
         int centerX = mapX + width / 2;
@@ -870,6 +891,7 @@ public final class LiveAtlasMarkerManager {
         double minVisibleZ = centerWorldZ - halfWorldHeight;
         double maxVisibleZ = centerWorldZ + halfWorldHeight;
         Map<String, MarkerCategory> snapshot = markerData;
+        double[] rotated = new double[2];
         for (String category : enabledCategories) {
             MarkerCategory data = snapshot.get(category);
             if (data == null) continue;
@@ -880,8 +902,14 @@ public final class LiveAtlasMarkerManager {
                 if (text == null || text.isBlank()) continue;
                 double worldCenterX = (area.minX + area.maxX) / 2.0;
                 double worldCenterZ = (area.minZ + area.maxZ) / 2.0;
-                int x = centerX + (int) Math.round((worldCenterX - centerWorldX) * scale);
-                int y = centerY + (int) Math.round((worldCenterZ - centerWorldZ) * scale);
+                // Position rotates with the map (so the label still sits over its own
+                // territory once that territory has spun), but the glyphs themselves
+                // are drawn through drawScaledLabel with no active rotation, so the
+                // name always reads upright instead of turning with the map.
+                MinimapHud.rotateOffset((worldCenterX - centerWorldX) * scale,
+                        (worldCenterZ - centerWorldZ) * scale, rotationDegrees, rotated);
+                int x = centerX + (int) Math.round(rotated[0]);
+                int y = centerY + (int) Math.round(rotated[1]);
                 int topY = y - Math.round(client.textRenderer.fontHeight * textScale / 2f);
                 drawScaledLabel(context, text, x, topY, textScale);
             }

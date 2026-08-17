@@ -32,7 +32,15 @@ public final class MinimapHud {
     private static final double[] PROJECTED_POINT_SCRATCH = new double[2];
     private static final String ARROW_GLYPH = "▲";
     private static final Text ARROW_TEXT = Text.literal(ARROW_GLYPH);
-    private static final Text NORTH_TEXT = Text.literal("N");
+    // The four fixed compass points ringing the map edge — separate from
+    // DIRECTION_TEXTS below, which is the single dynamic "which way am I currently
+    // facing" readout. Base bearing is clockwise from north (0/90/180/270) to match
+    // both the existing yaw convention and the sin/cos ring-position math.
+    private static final String[] COMPASS_LABELS = {"N", "E", "S", "W"};
+    private static final Text[] COMPASS_TEXTS = {
+            Text.literal("N"), Text.literal("E"), Text.literal("S"), Text.literal("W")
+    };
+    private static final float[] COMPASS_BEARINGS = {0f, 90f, 180f, 270f};
     private static final String[] DIRECTIONS = {"남", "남서", "서", "북서", "북", "북동", "동", "남동"};
     private static final Text[] DIRECTION_TEXTS = {
             Text.literal("남"), Text.literal("남서"), Text.literal("서"), Text.literal("북서"),
@@ -293,25 +301,33 @@ public final class MinimapHud {
         int centerY = clampedY + height / 2;
 
         // "회전" spins the map itself so the player's current facing is always up,
-        // instead of true north — everything between the push and pop below is drawn
-        // in ordinary absolute screen coordinates exactly as before, the translate/
-        // rotate/translate-back trio just re-centres that coordinate space on the
-        // rotation pivot first. This is a matrix multiply already happening on the
-        // existing DrawContext matrix stack (the same one the direction arrow and
-        // waypoint label scaling already use every frame), not extra geometry or draw
-        // calls, so it doesn't add meaningfully to render cost.
+        // instead of true north. Only the tile mosaic and the chunk grid go through an
+        // actual rotated matrix below — they're plain image/line content with no
+        // "upright" concern. Everything else (territory fills keep their own inner
+        // matrix scope; markers, waypoints, players, navigation, and every label) instead
+        // rotates its own screen *position* by the same angle via rotateOffset() and
+        // draws unrotated, so icons land in the correct spun spot while names and text
+        // stay flat and readable instead of spinning — and tipping/flipping upside down
+        // — with the map. None of this is extra geometry or draw calls, just the same
+        // matrix multiply (or, off the matrix stack, the same amount of trig) already
+        // happening for the direction arrow and waypoint label scaling every frame.
         boolean rotating = config.rotateWithPlayer && client.player != null;
         float contentRotation = rotating ? -(client.player.getYaw() + 180.0f) : 0f;
+
         PlatformCompat.push(context);
         if (rotating) {
             PlatformCompat.translate(context, centerX, centerY);
             PlatformCompat.rotate(context, contentRotation);
             PlatformCompat.translate(context, -centerX, -centerY);
         }
-
         boolean drewMap = client.player != null && LiveAtlasTileManager.render(
                 context, clampedX, clampedY, width, height,
                 client.player.getX(), client.player.getZ(), zoom);
+        if (config.showGrid) {
+            drawChunkGrid(context, clampedX, clampedY, width, height,
+                    playerX, playerZ, zoom);
+        }
+        PlatformCompat.pop(context);
 
         // The most expensive optional layer: dense Towny territory near a city can mean
         // hundreds of semi-transparent fills and boundary lines redrawn every single
@@ -321,7 +337,7 @@ public final class MinimapHud {
         // 저사양 모드 forces it off outright regardless of that individual setting.
         if (client.player != null && config.showAreaOverlay && !config.lowSpecMode) {
             LiveAtlasMarkerManager.renderAreaOverlay(context, clampedX, clampedY,
-                    width, height, playerX, playerZ, zoom);
+                    width, height, playerX, playerZ, zoom, contentRotation);
         }
 
         // The small minimap and the overlay map share one loading indicator. Used to
@@ -333,19 +349,14 @@ public final class MinimapHud {
         // map and should just show it, not the loading indicator.
         boolean showLoading = loading.shouldShow(!drewMap);
 
-        if (config.showGrid) {
-            drawChunkGrid(context, clampedX, clampedY, width, height,
-                    playerX, playerZ, zoom);
-        }
-
         if (client.player != null && config.showWaypoints) {
             drawMapWaypoints(context, clampedX, clampedY, width, height,
-                    playerX, playerZ, zoom);
+                    playerX, playerZ, zoom, contentRotation);
         }
 
         if (client.player != null) {
             NavigationManager.renderOnMinimap(context, clampedX, clampedY,
-                    width, height, playerX, playerZ, zoom);
+                    width, height, playerX, playerZ, zoom, contentRotation);
         }
 
         if (showLoading) {
@@ -357,10 +368,8 @@ public final class MinimapHud {
             // than the map tile images, so they were still showing up floating over the
             // head-loading indicator even when the actual map underneath wasn't there.
             LiveAtlasPlayerManager.render(context, clampedX, clampedY, width, height,
-                    client.player.getX(), client.player.getZ(), zoom);
+                    client.player.getX(), client.player.getZ(), zoom, contentRotation);
         }
-
-        PlatformCompat.pop(context);
 
         if (client.player != null) {
             // The arrow always represents "forward", so while rotating it stays fixed
@@ -370,31 +379,37 @@ public final class MinimapHud {
             drawDirectionArrow(context, centerX, centerY, rotating ? 180f : client.player.getYaw());
             int directionIndex = cardinalDirectionIndex(client.player.getYaw());
             String direction = DIRECTIONS[directionIndex];
+            int halfWidth = width / 2;
+            int halfHeight = height / 2;
+            int[] point = new int[2];
 
-            if (rotating) {
-                // North is no longer always "up" once the map spins, so the N marker
-                // orbits the rim instead of sitting fixed at top-centre, tracking
-                // wherever true north currently points on screen. The glyph itself is
-                // drawn without any additional rotation so it always reads upright.
-                double angleRad = Math.toRadians(contentRotation);
-                int ringRadius = Math.min(width, height) / 2 - 10;
-                int nX = centerX + (int) Math.round(Math.sin(angleRad) * ringRadius);
-                int nY = centerY - (int) Math.round(Math.cos(angleRad) * ringRadius);
-                context.drawTextWithShadow(client.textRenderer, NORTH_TEXT,
-                        nX - client.textRenderer.getWidth("N") / 2,
-                        nY - client.textRenderer.fontHeight / 2, 0xFFFFFFFF);
-            } else {
-                context.drawTextWithShadow(client.textRenderer, NORTH_TEXT, centerX - 3,
-                        clampedY + 3, 0xFFFFFFFF);
+            // The four fixed compass points, always projected onto the map's actual
+            // edge — the circle's rim when circularShape is on, otherwise the real
+            // square border via projectToMapEdge, so they never float short of a
+            // square's corners at a diagonal bearing the way a fixed circular radius
+            // would. Bearing 0 (north) is wherever it currently sits on screen: fixed
+            // at top when not rotating, or wherever contentRotation has spun it to.
+            for (int i = 0; i < COMPASS_BEARINGS.length; i++) {
+                float bearing = COMPASS_BEARINGS[i] + contentRotation;
+                projectToMapEdge(centerX, centerY, halfWidth, halfHeight,
+                        config.circularShape, bearing, 10, point);
+                int labelWidth = client.textRenderer.getWidth(COMPASS_LABELS[i]);
+                context.drawTextWithShadow(client.textRenderer, COMPASS_TEXTS[i],
+                        point[0] - labelWidth / 2,
+                        point[1] - client.textRenderer.fontHeight / 2, 0xFFFFFFFF);
             }
 
-            // "원형" moves the heading label and coordinates off the square's corners
-            // (which get masked away below) to the circle's 3 o'clock and 6 o'clock
-            // points instead, alongside north's 12 o'clock.
+            // The dynamic "which way am I currently facing" readout — a different thing
+            // from the fixed N/E/S/W ring above. In square shape it keeps its original
+            // corner spot (nothing else uses that corner there); in circular shape that
+            // corner is trimmed away by the mask below, and the ring already occupies
+            // the 12/3/6/9 points, so it moves to the empty south-east gap between them.
             if (config.circularShape) {
+                projectToMapEdge(centerX, centerY, halfWidth, halfHeight, true,
+                        135f + contentRotation, 10, point);
                 context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
-                        clampedX + width - client.textRenderer.getWidth(direction) - 6,
-                        centerY - client.textRenderer.fontHeight / 2, 0xFFFFFF55);
+                        point[0] - client.textRenderer.getWidth(direction) / 2,
+                        point[1] - client.textRenderer.fontHeight / 2, 0xFFFFFF55);
             } else {
                 context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
                         clampedX + width - client.textRenderer.getWidth(direction) - 4,
@@ -405,9 +420,12 @@ public final class MinimapHud {
             // minimap is on screen, and String.format re-parses its pattern each call.
             Text coords = coordinateText(client.player.getX(), client.player.getY(), client.player.getZ());
             if (config.circularShape) {
+                // South-west gap, mirroring the heading readout's south-east spot.
+                projectToMapEdge(centerX, centerY, halfWidth, halfHeight, true,
+                        225f + contentRotation, 10, point);
                 context.drawTextWithShadow(client.textRenderer, coords,
-                        centerX - client.textRenderer.getWidth(coords) / 2,
-                        clampedY + height - client.textRenderer.fontHeight - 4, 0xFFFFFFFF);
+                        point[0] - client.textRenderer.getWidth(coords) / 2,
+                        point[1] - client.textRenderer.fontHeight / 2, 0xFFFFFFFF);
             } else {
                 context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
                         clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
@@ -480,7 +498,7 @@ public final class MinimapHud {
 
     private static void drawMapWaypoints(DrawContext context, int mapX, int mapY,
                                          int width, int height, double centerWorldX,
-                                         double centerWorldZ, int zoom) {
+                                         double centerWorldZ, int zoom, float rotationDegrees) {
         MinimapConfig config = PlanetEarthMinimapClient.config;
         double scale = 4.0 / (1 << MathHelper.clamp(zoom, 0, 7));
         double zoomFactor = WAYPOINT_ZOOM_FACTORS[MathHelper.clamp(zoom, 0, 7)];
@@ -489,13 +507,16 @@ public final class MinimapHud {
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
         int half = size / 2;
+        double[] rotated = new double[2];
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         try {
             for (MinimapConfig.Waypoint waypoint : config.waypoints) {
-                int x = centerX + (int) Math.round((waypoint.x - centerWorldX) * scale);
-                int y = centerY + (int) Math.round((waypoint.z - centerWorldZ) * scale);
+                rotateOffset((waypoint.x - centerWorldX) * scale,
+                        (waypoint.z - centerWorldZ) * scale, rotationDegrees, rotated);
+                int x = centerX + (int) Math.round(rotated[0]);
+                int y = centerY + (int) Math.round(rotated[1]);
                 if (x < mapX - half || x > mapX + width + half
-                        || y < mapY || y > mapY + height + size) continue;
+                        || y < mapY - half || y > mapY + height + half) continue;
                 WaypointPalette.drawMarker(context, x, y, size,
                         waypoint.color, waypoint.shape);
             }
@@ -775,5 +796,52 @@ public final class MinimapHud {
 
     private static int cardinalDirectionIndex(float yaw) {
         return Math.floorMod(Math.round(yaw / 45.0f), DIRECTIONS.length);
+    }
+
+    /** Rotates a screen-space offset by the same angle {@link PlatformCompat#rotate}
+     *  would apply to it through the matrix stack — used by every renderer (waypoints,
+     *  site markers, players, navigation) that needs its icon to land in the correct
+     *  spun position while drawing its own label upright afterwards, rather than
+     *  drawing under an active rotated matrix the way the tile mosaic and grid lines
+     *  do. Package-private so the other per-layer renderers can share one
+     *  implementation instead of duplicating the trig, and so it lives once in the
+     *  main source set instead of once per Minecraft-version compat layer. */
+    static void rotateOffset(double dx, double dy, float rotationDegrees, double[] out) {
+        if (rotationDegrees == 0f) {
+            out[0] = dx;
+            out[1] = dy;
+            return;
+        }
+        double rad = Math.toRadians(rotationDegrees);
+        double cos = Math.cos(rad);
+        double sin = Math.sin(rad);
+        out[0] = dx * cos - dy * sin;
+        out[1] = dx * sin + dy * cos;
+    }
+
+    /** Where a ray from the map's centre at the given bearing (0 = up/north, clockwise)
+     *  meets the map's own edge — a circle's edge when circularShape is on, otherwise
+     *  the square's actual border, so a rotating compass point (or, at bearing 0 with
+     *  no rotation, the ordinary fixed "N") always sits right against the frame
+     *  instead of floating short of a square's corners the way a fixed circular
+     *  radius would. */
+    private static void projectToMapEdge(int centerX, int centerY, int halfWidth, int halfHeight,
+                                         boolean circular, double bearingDegrees, int inset, int[] out) {
+        double rad = Math.toRadians(bearingDegrees);
+        double dx = Math.sin(rad);
+        double dy = -Math.cos(rad);
+        if (circular) {
+            int radius = Math.min(halfWidth, halfHeight) - inset;
+            out[0] = centerX + (int) Math.round(dx * radius);
+            out[1] = centerY + (int) Math.round(dy * radius);
+            return;
+        }
+        double availableX = halfWidth - inset;
+        double availableY = halfHeight - inset;
+        double scale = Math.min(
+                dx != 0 ? availableX / Math.abs(dx) : Double.MAX_VALUE,
+                dy != 0 ? availableY / Math.abs(dy) : Double.MAX_VALUE);
+        out[0] = centerX + (int) Math.round(dx * scale);
+        out[1] = centerY + (int) Math.round(dy * scale);
     }
 }

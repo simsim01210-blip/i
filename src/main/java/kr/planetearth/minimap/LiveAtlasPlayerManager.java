@@ -82,7 +82,7 @@ public final class LiveAtlasPlayerManager {
     }
 
     public static void render(DrawContext context, int mapX, int mapY, int width, int height,
-                              double localX, double localZ, int zoom) {
+                              double localX, double localZ, int zoom, float rotationDegrees) {
         refreshIfNeeded();
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
@@ -90,11 +90,17 @@ public final class LiveAtlasPlayerManager {
         MinecraftClient client = MinecraftClient.getInstance();
         String localName = client.player == null ? "" : client.player.getName().getString();
 
+        double[] rotated = new double[2];
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         for (WebPlayer player : players) {
             if (player.name.equalsIgnoreCase(localName)) continue;
-            int x = centerX + (int) Math.round((player.x - localX) * pixelsPerBlock);
-            int y = centerY + (int) Math.round((player.z - localZ) * pixelsPerBlock);
+            // The dot's position rotates with the map, but drawPlayer draws the face
+            // and nametag with no active rotation (only its own translate/scale), so
+            // both stay upright instead of spinning or flipping as the map turns.
+            MinimapHud.rotateOffset((player.x - localX) * pixelsPerBlock,
+                    (player.z - localZ) * pixelsPerBlock, rotationDegrees, rotated);
+            int x = centerX + (int) Math.round(rotated[0]);
+            int y = centerY + (int) Math.round(rotated[1]);
             if (x < mapX + 7 || x >= mapX + width - 7 || y < mapY + 7 || y >= mapY + height - 7) continue;
             drawPlayer(context, player, x, y, mapX, mapX + width);
         }
