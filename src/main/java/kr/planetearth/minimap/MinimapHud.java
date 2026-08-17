@@ -122,7 +122,7 @@ public final class MinimapHud {
         int screenHeight = client.getWindow().getScaledHeight();
         int slotX = screenWidth / 2 - 91 + 8 * 20 + 3;
         int slotY = screenHeight - 22 + 3;
-        PlatformCompat.drawTexture(context, HOTBAR_WATERMARK, slotX, slotY, 0, 0, 16, 16, 16, 16);
+        PlatformCompat.drawTranslucentTexture(context, HOTBAR_WATERMARK, slotX, slotY, 0, 0, 16, 16, 16, 16);
     }
 
     private static void drawWaypointHudMarkers(DrawContext context) {

@@ -1,5 +1,6 @@
 package kr.planetearth.minimap;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.client.texture.NativeImage;
@@ -27,6 +28,24 @@ final class PlatformCompat {
                             int x, int y, int u, int v, int width, int height,
                             int textureWidth, int textureHeight) {
         context.drawTexture(texture, x, y, u, v, width, height, textureWidth, textureHeight);
+    }
+
+    /** For textures whose own PNG already has real per-pixel alpha baked in (the
+     *  hotbar watermark) rather than trying to tint an opaque texture at draw time —
+     *  that shader-colour approach is the specific technique that repeatedly failed
+     *  above. A plain drawTexture() call can still come out fully opaque if GL blend
+     *  simply isn't enabled at that exact point in the frame; the watermark draws as
+     *  the very first thing in the HUD layer, before anything else in this mod has
+     *  implicitly turned blend on via its own fill() calls, so it was hitting exactly
+     *  that. Blend is switched on only around this one call and restored after,
+     *  rather than assumed to already be in the right state. */
+    static void drawTranslucentTexture(DrawContext context, Identifier texture,
+                                       int x, int y, int u, int v, int width, int height,
+                                       int textureWidth, int textureHeight) {
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        context.drawTexture(texture, x, y, u, v, width, height, textureWidth, textureHeight);
+        RenderSystem.disableBlend();
     }
 
     /**
