@@ -72,6 +72,12 @@ public final class MinimapConfig {
      *  land-area names and the other just labels individual points. */
     public boolean showAreaLabels = false;
     public int showMapLabelScalePercent = 100;
+    /** Minecraft's bitmap font has no hinting, so shrinking dense Korean glyphs via a
+     *  matrix scale (the only way to get an in-between size out of it) blurs their many
+     *  strokes into each other well before Latin text at the same scale has a problem.
+     *  Bold gives each stroke more starting mass to survive that blur, which tends to
+     *  help more than it hurts even at 100%+, so this defaults on. */
+    public boolean boldMapLabels = true;
     /** Spins the map itself so the player's current facing is always "up" instead of
      *  true north. Purely a draw-time rotation of the existing content (see
      *  MinimapHud#drawMap) — no extra tile fetching, decoding, or geometry work. */

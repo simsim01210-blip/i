@@ -851,19 +851,26 @@ public final class LiveAtlasMarkerManager {
      *  labels so the size slider affects both the same way. */
     private static void drawScaledLabel(DrawContext context, String text, int centerX, int topY, float scale) {
         MinecraftClient client = MinecraftClient.getInstance();
+        // "§l" is the legacy bold formatting code — it doesn't change getWidth(), only
+        // how each glyph is stroked, and gives dense Korean characters more starting
+        // stroke mass to survive the matrix-scale blur below without vanishing.
+        String rendered = PlanetEarthMinimapClient.config.boldMapLabels ? "§l" + text : text;
         int rawWidth = client.textRenderer.getWidth(text);
         int scaledWidth = Math.round(rawWidth * scale);
         int scaledHeight = Math.round(client.textRenderer.fontHeight * scale);
         int x = centerX - scaledWidth / 2;
         context.fill(x - 2, topY - 1, x + scaledWidth + 2, topY + scaledHeight + 1, 0xA0101010);
+        // No drop shadow: the background box above already gives it contrast, and a
+        // shadow is a second, slightly offset copy of every stroke — exactly the kind
+        // of doubling that turns already-blurred small Korean text into a smear.
         if (Math.abs(scale - 1.0f) < 0.001f) {
-            context.drawTextWithShadow(client.textRenderer, text, x, topY, 0xFFFFFFFF);
+            context.drawText(client.textRenderer, rendered, x, topY, 0xFFFFFFFF, false);
             return;
         }
         PlatformCompat.push(context);
         PlatformCompat.translate(context, x, topY);
         PlatformCompat.scale(context, scale, scale);
-        context.drawTextWithShadow(client.textRenderer, text, 0, 0, 0xFFFFFFFF);
+        context.drawText(client.textRenderer, rendered, 0, 0, 0xFFFFFFFF, false);
         PlatformCompat.pop(context);
     }
 

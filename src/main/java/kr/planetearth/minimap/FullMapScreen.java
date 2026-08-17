@@ -42,6 +42,7 @@ abstract class FullMapScreenBase extends Screen {
     private boolean panning;
     private ButtonWidget siteMarkerButton;
     private ButtonWidget areaLabelButton;
+    private ButtonWidget boldLabelButton;
     private ButtonWidget waypointButton;
     // Captured live from rebuildSidebar() instead of hand-counted from row heights —
     // a hardcoded formula here silently drifted out of sync (and started overlapping
@@ -189,6 +190,12 @@ abstract class FullMapScreenBase extends Screen {
                 "이름 표시 크기", 60, 200, config.showMapLabelScalePercent, value -> {
             config.showMapLabelScalePercent = value;
         }));
+        y += 22;
+        boldLabelButton = addDrawableChild(ButtonWidget.builder(boldLabelText(config), pressed -> {
+            config.boldMapLabels = !config.boldMapLabels;
+            pressed.setMessage(boldLabelText(config));
+            config.save();
+        }).dimensions(panelX, y, controlWidth, 20).build());
         y += 22;
 
         // A blank gap first (matches the categories → player-search spacing above) so
@@ -447,6 +454,13 @@ abstract class FullMapScreenBase extends Screen {
         return Text.literal("이름 표시: " + suffix);
     }
 
+    /** Bold gives small, matrix-scaled Korean text more stroke mass to survive the
+     *  blur — worth a dedicated toggle since, unlike the shadow removal next to it,
+     *  it's a look some players may still prefer off at 100%+ scale. */
+    private static Text boldLabelText(MinimapConfig config) {
+        return Text.literal("이름 굵게: " + (config.boldMapLabels ? "켜짐" : "꺼짐"));
+    }
+
     private static void cycleLabelMode(MinimapConfig config) {
         if (!config.showMarkerLabels && !config.showAreaLabels) {
             config.showMarkerLabels = true;
@@ -556,6 +570,7 @@ abstract class FullMapScreenBase extends Screen {
         }
         if (siteMarkerButton != null) siteMarkerButton.setMessage(siteMarkerText());
         if (areaLabelButton != null) areaLabelButton.setMessage(labelModeText(config));
+        if (boldLabelButton != null) boldLabelButton.setMessage(boldLabelText(config));
         if (waypointButton != null) waypointButton.setMessage(waypointText());
         if (playerButton != null) playerButton.setMessage(playerText());
         if (playerSearchButton != null) playerSearchButton.setMessage(playerSearchText());
