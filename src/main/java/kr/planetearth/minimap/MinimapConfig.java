@@ -72,6 +72,14 @@ public final class MinimapConfig {
      *  land-area names and the other just labels individual points. */
     public boolean showAreaLabels = false;
     public int showMapLabelScalePercent = 100;
+    /** Spins the map itself so the player's current facing is always "up" instead of
+     *  true north. Purely a draw-time rotation of the existing content (see
+     *  MinimapHud#drawMap) — no extra tile fetching, decoding, or geometry work. */
+    public boolean rotateWithPlayer = false;
+    /** Masks the square minimap's four corners into a circle. Adds a small, fixed
+     *  number of extra solid-colour fills per frame (see MinimapHud#drawCircularCornerMask)
+     *  — no change to tile/marker rendering cost. */
+    public boolean circularShape = false;
 
     public static MinimapConfig load() {
         if (!Files.exists(PATH)) {

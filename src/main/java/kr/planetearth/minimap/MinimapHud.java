@@ -285,6 +285,25 @@ public final class MinimapHud {
 
         double playerX = client.player == null ? 0 : client.player.getX();
         double playerZ = client.player == null ? 0 : client.player.getZ();
+        int centerX = clampedX + width / 2;
+        int centerY = clampedY + height / 2;
+
+        // "회전" spins the map itself so the player's current facing is always up,
+        // instead of true north — everything between the push and pop below is drawn
+        // in ordinary absolute screen coordinates exactly as before, the translate/
+        // rotate/translate-back trio just re-centres that coordinate space on the
+        // rotation pivot first. This is a matrix multiply already happening on the
+        // existing DrawContext matrix stack (the same one the direction arrow and
+        // waypoint label scaling already use every frame), not extra geometry or draw
+        // calls, so it doesn't add meaningfully to render cost.
+        boolean rotating = config.rotateWithPlayer && client.player != null;
+        float contentRotation = rotating ? -(client.player.getYaw() + 180.0f) : 0f;
+        PlatformCompat.push(context);
+        if (rotating) {
+            PlatformCompat.translate(context, centerX, centerY);
+            PlatformCompat.rotate(context, contentRotation);
+            PlatformCompat.translate(context, -centerX, -centerY);
+        }
 
         boolean drewMap = client.player != null && LiveAtlasTileManager.render(
                 context, clampedX, clampedY, width, height,
@@ -329,32 +348,106 @@ public final class MinimapHud {
             drawLoadingIndicator(context, clampedX, clampedY, width, height);
         }
 
-        if (client.player != null) {
-            int centerX = clampedX + width / 2;
-            int centerY = clampedY + height / 2;
+        if (client.player != null && config.showPlayers && !showLoading) {
             // Other players' position markers and name tags come from a separate API
             // than the map tile images, so they were still showing up floating over the
             // head-loading indicator even when the actual map underneath wasn't there.
-            if (config.showPlayers && !showLoading) {
-                LiveAtlasPlayerManager.render(context, clampedX, clampedY, width, height,
-                        client.player.getX(), client.player.getZ(), zoom);
-            }
-            drawDirectionArrow(context, centerX, centerY, client.player.getYaw());
+            LiveAtlasPlayerManager.render(context, clampedX, clampedY, width, height,
+                    client.player.getX(), client.player.getZ(), zoom);
+        }
+
+        PlatformCompat.pop(context);
+
+        if (client.player != null) {
+            // The arrow always represents "forward", so while rotating it stays fixed
+            // pointing straight up instead of turning with the player — the map spins
+            // underneath it instead. 180 cancels out drawDirectionArrow's own +180, so
+            // the glyph ends up with zero net rotation regardless of real facing.
+            drawDirectionArrow(context, centerX, centerY, rotating ? 180f : client.player.getYaw());
             int directionIndex = cardinalDirectionIndex(client.player.getYaw());
             String direction = DIRECTIONS[directionIndex];
-            context.drawTextWithShadow(client.textRenderer, NORTH_TEXT, centerX - 3,
-                    clampedY + 3, 0xFFFFFFFF);
-            context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
-                    clampedX + width - client.textRenderer.getWidth(direction) - 4,
-                    clampedY + 4, 0xFFFFFF55);
+
+            if (rotating) {
+                // North is no longer always "up" once the map spins, so the N marker
+                // orbits the rim instead of sitting fixed at top-centre, tracking
+                // wherever true north currently points on screen. The glyph itself is
+                // drawn without any additional rotation so it always reads upright.
+                double angleRad = Math.toRadians(contentRotation);
+                int ringRadius = Math.min(width, height) / 2 - 10;
+                int nX = centerX + (int) Math.round(Math.sin(angleRad) * ringRadius);
+                int nY = centerY - (int) Math.round(Math.cos(angleRad) * ringRadius);
+                context.drawTextWithShadow(client.textRenderer, NORTH_TEXT,
+                        nX - client.textRenderer.getWidth("N") / 2,
+                        nY - client.textRenderer.fontHeight / 2, 0xFFFFFFFF);
+            } else {
+                context.drawTextWithShadow(client.textRenderer, NORTH_TEXT, centerX - 3,
+                        clampedY + 3, 0xFFFFFFFF);
+            }
+
+            // "원형" moves the heading label and coordinates off the square's corners
+            // (which get masked away below) to the circle's 3 o'clock and 6 o'clock
+            // points instead, alongside north's 12 o'clock.
+            if (config.circularShape) {
+                context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
+                        clampedX + width - client.textRenderer.getWidth(direction) - 6,
+                        centerY - client.textRenderer.fontHeight / 2, 0xFFFFFF55);
+            } else {
+                context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
+                        clampedX + width - client.textRenderer.getWidth(direction) - 4,
+                        clampedY + 4, 0xFFFFFF55);
+            }
+
             // Hand-formatted instead of String.format: this runs every frame the
             // minimap is on screen, and String.format re-parses its pattern each call.
             Text coords = coordinateText(client.player.getX(), client.player.getY(), client.player.getZ());
-            context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
-                    clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
+            if (config.circularShape) {
+                context.drawTextWithShadow(client.textRenderer, coords,
+                        centerX - client.textRenderer.getWidth(coords) / 2,
+                        clampedY + height - client.textRenderer.fontHeight - 4, 0xFFFFFFFF);
+            } else {
+                context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
+                        clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
+            }
+        }
+
+        // Trims the square map down to a circle by painting the same solid colour
+        // that's already behind everything (the background fill above) back over the
+        // four corners in a stepped approximation — a handful of extra context.fill
+        // calls, the same technique the hotbar frame's bevel already builds itself
+        // from, rather than a true per-pixel clip (which DrawContext's scissor can't
+        // express — it's rectangle-only — without redrawing the whole map dozens of
+        // times per frame to fake it).
+        if (config.circularShape) {
+            drawCircularCornerMask(context, clampedX, clampedY, width, height, backgroundColor);
         }
 
         if (editing) drawResizeHandles(context, clampedX, clampedY, width, height);
+    }
+
+    private static final int CIRCULAR_MASK_STEPS = 10;
+
+    private static void drawCircularCornerMask(DrawContext context, int mapX, int mapY,
+                                                int width, int height, int color) {
+        int radius = Math.min(width, height) / 2;
+        int centerY = mapY + height / 2;
+        for (int step = 0; step < CIRCULAR_MASK_STEPS; step++) {
+            int rowTop = step * radius / CIRCULAR_MASK_STEPS;
+            int rowBottom = (step + 1) * radius / CIRCULAR_MASK_STEPS;
+            // Uses the band's inner (closer-to-centre) edge so the mask only ever
+            // trims outside the circle and never bites into it.
+            double distanceFromCenter = radius - rowTop;
+            double insideSquared = (double) radius * radius - distanceFromCenter * distanceFromCenter;
+            int cut = insideSquared > 0 ? radius - (int) Math.sqrt(insideSquared) : radius;
+            if (cut <= 0) continue;
+            int topRowStart = centerY - radius + rowTop;
+            int topRowEnd = centerY - radius + rowBottom;
+            context.fill(mapX, topRowStart, mapX + cut, topRowEnd, color);
+            context.fill(mapX + width - cut, topRowStart, mapX + width, topRowEnd, color);
+            int bottomRowStart = mapY + height - rowBottom;
+            int bottomRowEnd = mapY + height - rowTop;
+            context.fill(mapX, bottomRowStart, mapX + cut, bottomRowEnd, color);
+            context.fill(mapX + width - cut, bottomRowStart, mapX + width, bottomRowEnd, color);
+        }
     }
 
     private static void drawMapWaypoints(DrawContext context, int mapX, int mapY,

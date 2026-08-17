@@ -106,6 +106,16 @@ abstract class MinimapEditorScreenBase extends Screen {
             });
             y += 24;
 
+            addSoundButton(toggleLabel("회전", config.rotateWithPlayer), left, y, button -> {
+                config.rotateWithPlayer = !config.rotateWithPlayer;
+                rebuildControls();
+            });
+            addSoundButton(toggleLabel("원형", config.circularShape), right, y, button -> {
+                config.circularShape = !config.circularShape;
+                rebuildControls();
+            });
+            y += 24;
+
             addDrawableChild(new IntSlider(left, y, 160, "얼굴 크기", "", 2, 16, 1,
                     config.playerFaceSize, value -> config.playerFaceSize = value));
             addDrawableChild(new IntSlider(right, y, 160, "이름 크기", "%", 25, 150, 5,
@@ -153,6 +163,8 @@ abstract class MinimapEditorScreenBase extends Screen {
                 config.statusBarX = 12;
                 config.statusBarY = 170;
                 config.statusBarScalePercent = 100;
+                config.rotateWithPlayer = false;
+                config.circularShape = false;
                 config.lowSpecMode = false;
                 LiveAtlasTileManager.applyLowSpecMode(false);
                 fitToScreen();
