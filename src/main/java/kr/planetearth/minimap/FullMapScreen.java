@@ -41,7 +41,6 @@ abstract class FullMapScreenBase extends Screen {
     private boolean initializedCenter;
     private boolean panning;
     private ButtonWidget siteMarkerButton;
-    private ButtonWidget markerLabelButton;
     private ButtonWidget areaLabelButton;
     private ButtonWidget waypointButton;
     // Captured live from rebuildSidebar() instead of hand-counted from row heights —
@@ -172,21 +171,13 @@ abstract class FullMapScreenBase extends Screen {
         }));
         y += 30;
 
-        // Persistent labels instead of only-on-hover, split into two independent
-        // switches: each site marker's own name next to its icon (also shown on the
-        // corner minimap and the overlay map), and separately the country/town name
-        // centred in each coloured territory — one clutters the map with big land-area
-        // names, the other just labels individual points, so they don't have to be
-        // both on or both off together.
-        markerLabelButton = addDrawableChild(ButtonWidget.builder(markerLabelText(), pressed -> {
-            config.showMarkerLabels = !config.showMarkerLabels;
-            pressed.setMessage(markerLabelText());
-            config.save();
-        }).dimensions(panelX, y, controlWidth, 20).build());
-        y += 22;
-        areaLabelButton = addDrawableChild(ButtonWidget.builder(areaLabelText(), pressed -> {
-            config.showAreaLabels = !config.showAreaLabels;
-            pressed.setMessage(areaLabelText());
+        // One cycling button instead of two separate switches (마커 이름 표시 /
+        // 영역 이름 표시 side by side read as basically the same thing and were easy to
+        // mix up): 꺼짐 → 마커 이름(사이트 마커만) → 마커 이름 상세(+영역 이름도) → 꺼짐.
+        // Still just sets the same two underlying flags the renderer already reads.
+        areaLabelButton = addDrawableChild(ButtonWidget.builder(labelModeText(config), pressed -> {
+            cycleLabelMode(config);
+            pressed.setMessage(labelModeText(config));
             config.save();
         }).dimensions(panelX, y, controlWidth, 20).build());
         y += 22;
@@ -445,14 +436,22 @@ abstract class FullMapScreenBase extends Screen {
                 (PlanetEarthMinimapClient.config.showWaypoints ? "켜짐" : "꺼짐"));
     }
 
-    private Text markerLabelText() {
-        return Text.literal("마커 이름 표시: " +
-                (PlanetEarthMinimapClient.config.showMarkerLabels ? "켜짐" : "꺼짐"));
+    /** 꺼짐 → 마커 이름(사이트 마커만) → 마커 이름 상세(+영역 이름도) → 꺼짐 → ... */
+    private static Text labelModeText(MinimapConfig config) {
+        String suffix = !config.showMarkerLabels && !config.showAreaLabels ? "꺼짐"
+                : config.showAreaLabels ? "마커 이름 상세" : "마커 이름";
+        return Text.literal("이름 표시: " + suffix);
     }
 
-    private Text areaLabelText() {
-        return Text.literal("영역 이름 표시: " +
-                (PlanetEarthMinimapClient.config.showAreaLabels ? "켜짐" : "꺼짐"));
+    private static void cycleLabelMode(MinimapConfig config) {
+        if (!config.showMarkerLabels && !config.showAreaLabels) {
+            config.showMarkerLabels = true;
+        } else if (!config.showAreaLabels) {
+            config.showAreaLabels = true;
+        } else {
+            config.showMarkerLabels = false;
+            config.showAreaLabels = false;
+        }
     }
 
     /** One button cycling through every waypoint label mode instead of several separate
@@ -552,8 +551,7 @@ abstract class FullMapScreenBase extends Screen {
                     LiveAtlasMarkerManager.CATEGORIES.get(entry.getKey())));
         }
         if (siteMarkerButton != null) siteMarkerButton.setMessage(siteMarkerText());
-        if (markerLabelButton != null) markerLabelButton.setMessage(markerLabelText());
-        if (areaLabelButton != null) areaLabelButton.setMessage(areaLabelText());
+        if (areaLabelButton != null) areaLabelButton.setMessage(labelModeText(config));
         if (waypointButton != null) waypointButton.setMessage(waypointText());
         if (playerButton != null) playerButton.setMessage(playerText());
         if (playerSearchButton != null) playerSearchButton.setMessage(playerSearchText());
