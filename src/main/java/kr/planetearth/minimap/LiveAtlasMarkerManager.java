@@ -61,6 +61,15 @@ public final class LiveAtlasMarkerManager {
     private static final Map<String, Identifier> ICONS = new ConcurrentHashMap<>();
     private static final Set<String> ICON_PENDING = ConcurrentHashMap.newKeySet();
     private static volatile Map<String, MarkerCategory> markerData = Map.of();
+    // A Towny town's home-block marker and its claimed area polygon are very often
+    // given the identical name, so showing both a marker label and an area label at
+    // once literally repeats the same text twice, stacked almost on top of each other
+    // (worse still at a small label scale, where two near-overlapping copies blur
+    // into an unreadable smear rather than two distinct legible lines). Rebuilt
+    // alongside markerData each refresh; drawAreaLabels skips any area whose text a
+    // marker already covers, since the marker's label sits pinned exactly on its icon
+    // and the area's is otherwise a duplicate rather than extra information.
+    private static volatile Set<String> markerLabelKeys = Set.of();
     private static volatile long markerPayloadSignature = Long.MIN_VALUE;
     private static volatile String markerEtag;
     private static volatile String markerLastModified;
@@ -900,6 +909,12 @@ public final class LiveAtlasMarkerManager {
                         || area.maxZ < minVisibleZ || area.minZ > maxVisibleZ) continue;
                 String text = "정보 없음".equals(area.country) ? area.label : area.country;
                 if (text == null || text.isBlank()) continue;
+                // Skip when a site marker already shows this exact name (the common
+                // case: a town's home marker and its own claimed territory share a
+                // name) — the marker's label is pinned precisely on its icon, so
+                // drawing the area's copy too just doubles the same text on top of
+                // itself instead of adding information.
+                if (markerLabelKeys.contains(text.trim().toLowerCase(Locale.ROOT))) continue;
                 double worldCenterX = (area.minX + area.maxX) / 2.0;
                 double worldCenterZ = (area.minZ + area.maxZ) / 2.0;
                 // Position rotates with the map (so the label still sits over its own
@@ -986,6 +1001,7 @@ public final class LiveAtlasMarkerManager {
                     JsonObject sets = JsonParser.parseString(body).getAsJsonObject()
                             .getAsJsonObject("sets");
                     Map<String, MarkerCategory> updated = new LinkedHashMap<>();
+                    Set<String> labelKeys = new java.util.HashSet<>();
                     for (String category : CATEGORIES.keySet()) {
                         List<MapMarker> categoryMarkers = new ArrayList<>();
                         List<MapArea> categoryAreas = new ArrayList<>();
@@ -993,11 +1009,15 @@ public final class LiveAtlasMarkerManager {
                         if (set != null && set.has("markers")) {
                             for (Map.Entry<String, JsonElement> entry : set.getAsJsonObject("markers").entrySet()) {
                                 JsonObject value = entry.getValue().getAsJsonObject();
+                                String label = value.has("label") ? value.get("label").getAsString() : entry.getKey();
                                 categoryMarkers.add(new MapMarker(
-                                        value.has("label") ? value.get("label").getAsString() : entry.getKey(),
+                                        label,
                                         value.has("icon") ? value.get("icon").getAsString() : "default",
                                         value.get("x").getAsDouble(), value.get("z").getAsDouble()
                                 ));
+                                if (label != null && !label.isBlank()) {
+                                    labelKeys.add(label.trim().toLowerCase(Locale.ROOT));
+                                }
                             }
                         }
                         if (set != null && set.has("areas")) {
@@ -1020,6 +1040,7 @@ public final class LiveAtlasMarkerManager {
                                 List.copyOf(categoryAreas)));
                     }
                     markerData = Map.copyOf(updated);
+                    markerLabelKeys = Set.copyOf(labelKeys);
                     markerPayloadSignature = signature;
                     cachedMarkerWorld = world;
                     // Download every icon used by the completed snapshot up front. Rendering then only
