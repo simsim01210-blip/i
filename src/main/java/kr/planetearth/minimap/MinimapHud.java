@@ -5,6 +5,7 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.render.Camera;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.biome.Biome;
@@ -49,6 +50,12 @@ public final class MinimapHud {
     private static long cachedCoordinateY = Long.MIN_VALUE;
     private static long cachedCoordinateZ = Long.MIN_VALUE;
     private static Text cachedCoordinateText = Text.literal("");
+    // Pre-baked at ~32% opacity into the PNG itself (see the asset's generation
+    // script) rather than tinted at draw time — RenderSystem.setShaderColor alpha
+    // tinting on drawTexture has a documented history of rendering broken in this
+    // codebase, so a static faint asset sidesteps that entirely.
+    private static final Identifier HOTBAR_WATERMARK = new Identifier(
+            PlanetEarthMinimapClient.MOD_ID, "textures/gui/hotbar_watermark.png");
 
     private MinimapHud() {}
 
@@ -62,6 +69,8 @@ public final class MinimapHud {
         if (client.currentScreen instanceof MinimapEditorScreen
                 || client.currentScreen instanceof FullMapScreen) return;
         MinimapConfig config = PlanetEarthMinimapClient.config;
+
+        drawHotbarWatermark(context, client);
 
         boolean overlayHeld = client.currentScreen == null && PlanetEarthMinimapClient.overlayMapKey.isPressed();
         // The overlay map draws its own waypoint markers on top of itself (see
@@ -91,6 +100,21 @@ public final class MinimapHud {
 
         if (!config.enabled) return;
         drawMap(context, config.x, config.y, config.width, config.height, false);
+    }
+
+    /** A faint personal watermark drawn over the 9th (last) hotbar slot. Uses the
+     *  standard vanilla hotbar geometry (182x22 background centred at the bottom of
+     *  the screen, 20px-wide slots, 16x16 icon inset by 3px) rather than reading the
+     *  actual hotbar widget position, since drawing here doesn't need to react to a
+     *  held item — it just needs to line up with where slot 9 always is. Only hides
+     *  with the same hudHidden/F1 and menu-screen checks the rest of this HUD uses;
+     *  it isn't tied to config.enabled since it isn't part of the minimap itself. */
+    private static void drawHotbarWatermark(DrawContext context, MinecraftClient client) {
+        int screenWidth = client.getWindow().getScaledWidth();
+        int screenHeight = client.getWindow().getScaledHeight();
+        int slotX = screenWidth / 2 - 91 + 8 * 20 + 3;
+        int slotY = screenHeight - 22 + 3;
+        PlatformCompat.drawTexture(context, HOTBAR_WATERMARK, slotX, slotY, 0, 0, 16, 16, 16, 16);
     }
 
     private static void drawWaypointHudMarkers(DrawContext context) {
