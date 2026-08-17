@@ -195,7 +195,10 @@ public final class MinimapConfig {
         statusBarX = Math.max(0, statusBarX);
         statusBarY = Math.max(0, statusBarY);
         statusBarScalePercent = Math.max(25, Math.min(statusBarScalePercent, 200));
-        showMapLabelScalePercent = Math.max(25, Math.min(showMapLabelScalePercent, 200));
+        // 60 floor (not the usual 25): below this, Minecraft's unhinted bitmap font
+        // turns dense Korean glyphs into an unreadable smudge well before Latin text
+        // at the same scale would look bad.
+        showMapLabelScalePercent = Math.max(60, Math.min(showMapLabelScalePercent, 200));
     }
 
     public static final class Waypoint {

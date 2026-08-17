@@ -181,8 +181,12 @@ abstract class FullMapScreenBase extends Screen {
             config.save();
         }).dimensions(panelX, y, controlWidth, 20).build());
         y += 22;
+        // Floor raised from the old 25 — Minecraft's bitmap font has no hinting, and
+        // Korean glyphs have far more strokes packed into each character than Latin
+        // ones, so scaling them down much past this point turns them into unreadable
+        // smudges well before Latin text at the same scale would have a problem.
         addDrawableChild(new IntSlider(panelX, y, controlWidth,
-                "이름 표시 크기", 25, 200, config.showMapLabelScalePercent, value -> {
+                "이름 표시 크기", 60, 200, config.showMapLabelScalePercent, value -> {
             config.showMapLabelScalePercent = value;
         }));
         y += 22;

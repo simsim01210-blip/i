@@ -843,7 +843,7 @@ public final class LiveAtlasMarkerManager {
     }
 
     private static float labelScale() {
-        return MathHelper.clamp(PlanetEarthMinimapClient.config.showMapLabelScalePercent, 25, 200) / 100.0f;
+        return MathHelper.clamp(PlanetEarthMinimapClient.config.showMapLabelScalePercent, 60, 200) / 100.0f;
     }
 
     /** One persistent name label, horizontally centred on centerX with its top edge at
