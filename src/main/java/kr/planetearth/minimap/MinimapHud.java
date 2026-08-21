@@ -1,6 +1,8 @@
 package kr.planetearth.minimap;
 
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gl.Framebuffer;
+import net.minecraft.client.gl.SimpleFramebuffer;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.render.Camera;
 import net.minecraft.registry.entry.RegistryEntry;
@@ -22,6 +24,8 @@ public final class MinimapHud {
     // of the two rendered last each frame would stomp on the other's show/hide timer.
     private static final LoadingState MINIMAP_LOADING = new LoadingState();
     private static final LoadingState OVERLAY_LOADING = new LoadingState();
+    private static SimpleFramebuffer circularMapTarget;
+    private static boolean renderingCircularTarget;
     private static boolean overlayMapWasHeld;
     private static final int MAX_HUD_WAYPOINTS = 12;
     // Reused every frame instead of allocating a fresh ArrayList to sort-by-distance
@@ -270,7 +274,8 @@ public final class MinimapHud {
 
     public static void drawMap(DrawContext context, int x, int y, int width, int height, boolean editing) {
         drawMap(context, x, y, width, height, editing,
-                PlanetEarthMinimapClient.config.zoom, 0xE0153427, MINIMAP_LOADING);
+                PlanetEarthMinimapClient.config.zoom, 0xE0153427,
+                MINIMAP_LOADING, false, true);
     }
 
     /** Same rendering as the small corner minimap, but with an independently chosen
@@ -278,19 +283,36 @@ public final class MinimapHud {
      *  version without duplicating all of this. */
     public static void drawMap(DrawContext context, int x, int y, int width, int height, boolean editing,
                                int zoom, int backgroundColor) {
-        drawMap(context, x, y, width, height, editing, zoom, backgroundColor, OVERLAY_LOADING);
+        drawMap(context, x, y, width, height, editing, zoom, backgroundColor,
+                OVERLAY_LOADING, true, false);
     }
 
     private static void drawMap(DrawContext context, int x, int y, int width, int height, boolean editing,
-                                int zoom, int backgroundColor, LoadingState loading) {
+                                int zoom, int backgroundColor, LoadingState loading,
+                                boolean highPriorityTiles, boolean allowCircularShape) {
         MinecraftClient client = MinecraftClient.getInstance();
         MinimapConfig config = PlanetEarthMinimapClient.config;
-        int clampedX = MathHelper.clamp(x, 0, Math.max(0, client.getWindow().getScaledWidth() - width));
-        int clampedY = MathHelper.clamp(y, 0, Math.max(0, client.getWindow().getScaledHeight() - height));
+        boolean circularShape = allowCircularShape && config.circularShape;
+        int frameMargin = circularShape ? 4 : 0;
+        int maxX = client.getWindow().getScaledWidth() - width - frameMargin;
+        int maxY = client.getWindow().getScaledHeight() - height - frameMargin;
+        int minX = maxX >= frameMargin ? frameMargin : 0;
+        int minY = maxY >= frameMargin ? frameMargin : 0;
+        int clampedX = MathHelper.clamp(x, minX, Math.max(minX, maxX));
+        int clampedY = MathHelper.clamp(y, minY, Math.max(minY, maxY));
 
-        if (config.circularShape) {
-            drawCircularFrame(context, clampedX, clampedY, width, height);
-        } else {
+        // A solid-colour corner mask only makes a circle look round against the same
+        // colour; over the game it leaves a conspicuous square behind it. Render the
+        // ordinary map once into a transparent target and composite only its circular
+        // portion instead. All tiles, overlays, labels and loading UI are clipped in a
+        // single GPU pass, without redrawing the map once per scanline.
+        if (circularShape && !renderingCircularTarget) {
+            drawCircularMap(context, clampedX, clampedY, width, height, editing,
+                    zoom, backgroundColor, loading, highPriorityTiles);
+            return;
+        }
+
+        if (!circularShape) {
             drawHotbarFrame(context, clampedX, clampedY, width, height);
         }
         context.fill(clampedX, clampedY, clampedX + width, clampedY + height, backgroundColor);
@@ -314,6 +336,27 @@ public final class MinimapHud {
         boolean rotating = config.rotateWithPlayer && client.player != null;
         float contentRotation = rotating ? -(client.player.getYaw() + 180.0f) : 0f;
 
+        // Rotating an image with the original viewport dimensions leaves triangular
+        // holes at the frame corners. Render the inverse-rotated viewport's bounding
+        // rectangle instead. This is the minimum extra area needed for the current
+        // angle (rather than always paying for a full diagonal-sized square).
+        int contentX = clampedX;
+        int contentY = clampedY;
+        int contentWidth = width;
+        int contentHeight = height;
+        if (rotating) {
+            double radians = Math.toRadians(contentRotation);
+            double absCos = Math.abs(Math.cos(radians));
+            double absSin = Math.abs(Math.sin(radians));
+            contentWidth = evenCeiling(width * absCos + height * absSin + 2.0);
+            contentHeight = evenCeiling(width * absSin + height * absCos + 2.0);
+            contentX = centerX - contentWidth / 2;
+            contentY = centerY - contentHeight / 2;
+            // Expanded tiles must cover the rotated corners but never bleed past the
+            // actual configured frame into the game HUD.
+            context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
+        }
+
         PlatformCompat.push(context);
         if (rotating) {
             PlatformCompat.translate(context, centerX, centerY);
@@ -321,13 +364,14 @@ public final class MinimapHud {
             PlatformCompat.translate(context, -centerX, -centerY);
         }
         boolean drewMap = client.player != null && LiveAtlasTileManager.render(
-                context, clampedX, clampedY, width, height,
-                client.player.getX(), client.player.getZ(), zoom);
+                context, contentX, contentY, contentWidth, contentHeight,
+                client.player.getX(), client.player.getZ(), zoom, highPriorityTiles);
         if (config.showGrid) {
-            drawChunkGrid(context, clampedX, clampedY, width, height,
+            drawChunkGrid(context, contentX, contentY, contentWidth, contentHeight,
                     playerX, playerZ, zoom);
         }
         PlatformCompat.pop(context);
+        if (rotating) context.disableScissor();
 
         // The most expensive optional layer: dense Towny territory near a city can mean
         // hundreds of semi-transparent fills and boundary lines redrawn every single
@@ -336,8 +380,16 @@ public final class MinimapHud {
         // loss, so it gets its own off switch rather than being unconditional, and
         // 저사양 모드 forces it off outright regardless of that individual setting.
         if (client.player != null && config.showAreaOverlay && !config.lowSpecMode) {
-            LiveAtlasMarkerManager.renderAreaOverlay(context, clampedX, clampedY,
-                    width, height, playerX, playerZ, zoom, contentRotation);
+            // Same oversized-then-clipped treatment as the tile mosaic above (see
+            // contentX/contentY/contentWidth/contentHeight): without it, territory
+            // colour only ever covered the original, un-rotated square, so a rotated
+            // corner region could show plain tile with no claim tint even though the
+            // real map underneath does have a claim there — visible as a patch that
+            // looks emptier than its surroundings once the map had spun.
+            if (rotating) context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
+            LiveAtlasMarkerManager.renderAreaOverlay(context, contentX, contentY,
+                    contentWidth, contentHeight, playerX, playerZ, zoom, contentRotation);
+            if (rotating) context.disableScissor();
         }
 
         // The small minimap and the overlay map share one loading indicator. Used to
@@ -392,7 +444,7 @@ public final class MinimapHud {
             for (int i = 0; i < COMPASS_BEARINGS.length; i++) {
                 float bearing = COMPASS_BEARINGS[i] + contentRotation;
                 projectToMapEdge(centerX, centerY, halfWidth, halfHeight,
-                        config.circularShape, bearing, 10, point);
+                        circularShape, bearing, 10, point);
                 int labelWidth = client.textRenderer.getWidth(COMPASS_LABELS[i]);
                 context.drawTextWithShadow(client.textRenderer, COMPASS_TEXTS[i],
                         point[0] - labelWidth / 2,
@@ -404,7 +456,7 @@ public final class MinimapHud {
             // corner spot (nothing else uses that corner there); in circular shape that
             // corner is trimmed away by the mask below, and the ring already occupies
             // the 12/3/6/9 points, so it moves to the empty south-east gap between them.
-            if (config.circularShape) {
+            if (circularShape) {
                 projectToMapEdge(centerX, centerY, halfWidth, halfHeight, true,
                         135f + contentRotation, 10, point);
                 context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
@@ -419,13 +471,26 @@ public final class MinimapHud {
             // Hand-formatted instead of String.format: this runs every frame the
             // minimap is on screen, and String.format re-parses its pattern each call.
             Text coords = coordinateText(client.player.getX(), client.player.getY(), client.player.getZ());
-            if (config.circularShape) {
-                // South-west gap, mirroring the heading readout's south-east spot.
-                projectToMapEdge(centerX, centerY, halfWidth, halfHeight, true,
-                        225f + contentRotation, 10, point);
+            if (circularShape) {
+                // Coordinates are HUD information, not part of the rotating map. Keep
+                // them fixed in the lower interior of the circle and choose the lowest
+                // row whose chord is still wide enough for the complete coordinate
+                // string. This prevents both orbiting and edge clipping on small maps.
+                int coordinateWidth = client.textRenderer.getWidth(coords);
+                int innerRadius = Math.max(1, Math.min(halfWidth, halfHeight) - 7);
+                int requiredHalfWidth = coordinateWidth / 2 + 4;
+                int desiredOffset = Math.max(0,
+                        innerRadius - client.textRenderer.fontHeight - 10);
+                int safeOffset = 0;
+                if (requiredHalfWidth < innerRadius) {
+                    safeOffset = (int) Math.floor(Math.sqrt(
+                            (double) innerRadius * innerRadius
+                                    - (double) requiredHalfWidth * requiredHalfWidth));
+                }
+                int coordinateY = centerY + Math.min(desiredOffset, safeOffset)
+                        - client.textRenderer.fontHeight / 2;
                 context.drawTextWithShadow(client.textRenderer, coords,
-                        point[0] - client.textRenderer.getWidth(coords) / 2,
-                        point[1] - client.textRenderer.fontHeight / 2, 0xFFFFFFFF);
+                        centerX - coordinateWidth / 2, coordinateY, 0xFFFFFFFF);
             } else {
                 context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
                         clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
@@ -439,61 +504,74 @@ public final class MinimapHud {
         // from, rather than a true per-pixel clip (which DrawContext's scissor can't
         // express — it's rectangle-only — without redrawing the whole map dozens of
         // times per frame to fake it).
-        if (config.circularShape) {
-            drawCircularCornerMask(context, clampedX, clampedY, width, height, backgroundColor);
-        }
-
         if (editing) drawResizeHandles(context, clampedX, clampedY, width, height);
     }
 
-    /** Round counterpart to {@link #drawHotbarFrame} — nested filled circles standing
-     *  in for the square version's nested rectangles, biggest/darkest first so each
-     *  smaller, lighter ring is drawn on top of it. Purely for the border; the map
-     *  content circle itself is still cut from the ordinary square render afterwards
-     *  by {@link #drawCircularCornerMask}. */
+    private static void drawCircularMap(DrawContext context, int x, int y, int width, int height,
+                                        boolean editing, int zoom, int backgroundColor,
+                                        LoadingState loading, boolean highPriorityTiles) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        // Width and height can be resized independently in the editor. A circular map
+        // must nevertheless use one diameter everywhere; otherwise the source map is
+        // laid out as a rectangle and only cropped as a circle at the very end, which
+        // makes its apparent scale/centre look wrong. Centre the largest fitting square
+        // inside the configured bounds and use it for every part of this render pass.
+        int diameter = Math.max(1, Math.min(width, height));
+        int circleX = x + (width - diameter) / 2;
+        int circleY = y + (height - diameter) / 2;
+        Framebuffer mainTarget = client.getFramebuffer();
+        int framebufferWidth = client.getWindow().getFramebufferWidth();
+        int framebufferHeight = client.getWindow().getFramebufferHeight();
+        if (circularMapTarget == null) {
+            circularMapTarget = new SimpleFramebuffer(framebufferWidth, framebufferHeight,
+                    false, MinecraftClient.IS_SYSTEM_MAC);
+            circularMapTarget.setClearColor(0f, 0f, 0f, 0f);
+        } else if (circularMapTarget.textureWidth != framebufferWidth
+                || circularMapTarget.textureHeight != framebufferHeight) {
+            circularMapTarget.resize(framebufferWidth, framebufferHeight, MinecraftClient.IS_SYSTEM_MAC);
+            circularMapTarget.setClearColor(0f, 0f, 0f, 0f);
+        }
+
+        // Flush anything queued for the game framebuffer before switching targets.
+        context.draw();
+        circularMapTarget.clear(MinecraftClient.IS_SYSTEM_MAC);
+        circularMapTarget.beginWrite(false);
+        renderingCircularTarget = true;
+        try {
+            // The circular layout rules remain enabled inside this pass. Only the old
+            // colour-mask/frame step is bypassed by renderingCircularTarget.
+            drawMap(context, circleX, circleY, diameter, diameter, false, zoom, backgroundColor,
+                    loading, highPriorityTiles, true);
+            context.draw();
+        } finally {
+            renderingCircularTarget = false;
+            circularMapTarget.endWrite();
+            mainTarget.beginWrite(false);
+        }
+
+        int centerX = circleX + diameter / 2;
+        int centerY = circleY + diameter / 2;
+        int radius = diameter / 2;
+        PlatformCompat.drawFramebufferCircle(context, circularMapTarget.getColorAttachment(),
+                centerX, centerY, radius,
+                client.getWindow().getScaledWidth(), client.getWindow().getScaledHeight());
+        drawCircularFrame(context, circleX, circleY, diameter, diameter);
+        if (editing) drawResizeHandles(context, circleX, circleY, diameter, diameter);
+    }
+
+    private static int evenCeiling(double value) {
+        int rounded = (int) Math.ceil(value);
+        return (rounded + 1) & ~1;
+    }
+
+    /** Round counterpart to {@link #drawHotbarFrame}. Unlike filled disks, these are
+     *  true rings, so this bevel can be rendered after the map without covering it. */
     private static void drawCircularFrame(DrawContext context, int mapX, int mapY, int width, int height) {
         int radius = Math.min(width, height) / 2;
         if (radius <= 0) return;
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
-        drawFilledCircle(context, centerX, centerY, radius + 4, 0xF0101010);
-        drawFilledCircle(context, centerX, centerY, radius + 2, 0xFF8B8B8B);
-        drawFilledCircle(context, centerX, centerY, radius + 1, 0xFF555555);
-    }
-
-    private static void drawFilledCircle(DrawContext context, int centerX, int centerY, int radius, int color) {
-        for (int row = -radius; row <= radius; row++) {
-            double inside = (double) radius * radius - (double) row * row;
-            if (inside < 0) continue;
-            int halfWidth = (int) Math.round(Math.sqrt(inside));
-            context.fill(centerX - halfWidth, centerY + row, centerX + halfWidth, centerY + row + 1, color);
-        }
-    }
-
-    private static void drawCircularCornerMask(DrawContext context, int mapX, int mapY,
-                                                int width, int height, int color) {
-        int radius = Math.min(width, height) / 2;
-        if (radius <= 0) return;
-        int centerY = mapY + height / 2;
-        // One masking band per screen row (not a coarse fixed step count) so the cut
-        // reads as an actual smooth circle instead of a visible staircase — still
-        // nothing but plain context.fill() calls in a single solid colour, which
-        // DrawContext already coalesces into a handful of real GPU draws the same way
-        // it already batches the area-overlay's own dense fills, so the extra
-        // resolution doesn't scale render cost the way redrawing map content per band
-        // would have.
-        for (int row = 0; row < radius; row++) {
-            double distanceFromCenter = radius - row;
-            double insideSquared = (double) radius * radius - distanceFromCenter * distanceFromCenter;
-            int cut = insideSquared > 0 ? radius - (int) Math.ceil(Math.sqrt(insideSquared)) : radius;
-            if (cut <= 0) continue;
-            int topY = centerY - radius + row;
-            context.fill(mapX, topY, mapX + cut, topY + 1, color);
-            context.fill(mapX + width - cut, topY, mapX + width, topY + 1, color);
-            int bottomY = mapY + height - row - 1;
-            context.fill(mapX, bottomY, mapX + cut, bottomY + 1, color);
-            context.fill(mapX + width - cut, bottomY, mapX + width, bottomY + 1, color);
-        }
+        PlatformCompat.drawCircularHotbarFrame(context, centerX, centerY, radius);
     }
 
     private static void drawMapWaypoints(DrawContext context, int mapX, int mapY,

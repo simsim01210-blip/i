@@ -38,8 +38,9 @@ public final class LiveAtlasTileManager {
     // A full-screen viewport can ask for well over a hundred tiles in one frame.
     // Keep enough requests in flight to saturate the workers without retaining an
     // unbounded number of response byte arrays and decoded NativeImages.
-    private static final int NORMAL_MAX_PENDING = 64;
-    private static final int LOW_SPEC_MAX_PENDING = 24;
+    private static final int NORMAL_MAX_PENDING = 96;
+    private static final int LOW_SPEC_MAX_PENDING = 32;
+    private static final int PRIORITY_EXTRA_PENDING = 64;
     private static final int EMPTY_TILE_MAX_BYTES = 256;
     private static final double MAP_SCALE = 4.0;
     private static final long FALLBACK_REFRESH_NANOS = Duration.ofMinutes(10).toNanos();
@@ -56,11 +57,23 @@ public final class LiveAtlasTileManager {
     // 저사양 모드: leaves even more cores free for the game at the cost of slower tile
     // loading — see PlanetEarthMinimapClient.applyLowSpecMode.
     private static final int LOW_SPEC_POOL_SIZE = Math.max(1, NORMAL_POOL_SIZE / 2);
+    private static final int PRIORITY_POOL_SIZE = 2;
+    private static final int LOW_SPEC_PRIORITY_POOL_SIZE = 1;
+    private static final long PRIORITY_VIEW_HOLD_NANOS = Duration.ofMillis(250).toNanos();
     private static final ThreadPoolExecutor TILE_EXECUTOR = (ThreadPoolExecutor)
             Executors.newFixedThreadPool(NORMAL_POOL_SIZE, runnable -> {
                 Thread thread = new Thread(runnable, "planetearth-tile-worker");
                 thread.setDaemon(true);
                 thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+                return thread;
+            });
+    // The hold-G auxiliary map is explicitly user-requested content and must not wait
+    // behind WebP decode jobs queued by the small minimap or background prefetching.
+    private static final ThreadPoolExecutor PRIORITY_TILE_EXECUTOR = (ThreadPoolExecutor)
+            Executors.newFixedThreadPool(PRIORITY_POOL_SIZE, runnable -> {
+                Thread thread = new Thread(runnable, "planetearth-overlay-tile-worker");
+                thread.setDaemon(true);
+                thread.setPriority(Thread.NORM_PRIORITY);
                 return thread;
             });
     // HttpClient bookkeeping must stay responsive even while every tile worker is
@@ -73,11 +86,24 @@ public final class LiveAtlasTileManager {
                 thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 2));
                 return thread;
             });
+    private static final ExecutorService PRIORITY_HTTP_EXECUTOR =
+            Executors.newFixedThreadPool(2, runnable -> {
+                Thread thread = new Thread(runnable, "planetearth-overlay-tile-http");
+                thread.setDaemon(true);
+                thread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+                return thread;
+            });
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .version(HttpClient.Version.HTTP_2)
             .executor(HTTP_EXECUTOR)
+            .build();
+    private static final HttpClient PRIORITY_HTTP = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(8))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .version(HttpClient.Version.HTTP_2)
+            .executor(PRIORITY_HTTP_EXECUTOR)
             .build();
     private static final Map<TileKey, Tile> TILES = new ConcurrentHashMap<>();
     private static final Map<TileKey, CompletableFuture<?>> PENDING = new ConcurrentHashMap<>();
@@ -89,6 +115,7 @@ public final class LiveAtlasTileManager {
     private static VisibleTileOrder recentTileOrder;
     private static VisibleTileOrder previousTileOrder;
     private static long nextMetadataCleanup;
+    private static volatile long priorityViewUntilNanos;
 
     private LiveAtlasTileManager() {}
 
@@ -97,14 +124,20 @@ public final class LiveAtlasTileManager {
      *  maximumPoolSize even transiently, hence growing/shrinking in different orders. */
     public static void applyLowSpecMode(boolean lowSpec) {
         int size = lowSpec ? LOW_SPEC_POOL_SIZE : NORMAL_POOL_SIZE;
-        if (size > TILE_EXECUTOR.getMaximumPoolSize()) {
-            TILE_EXECUTOR.setMaximumPoolSize(size);
-            TILE_EXECUTOR.setCorePoolSize(size);
-        } else {
-            TILE_EXECUTOR.setCorePoolSize(size);
-            TILE_EXECUTOR.setMaximumPoolSize(size);
-        }
+        resizeExecutor(TILE_EXECUTOR, size);
+        resizeExecutor(PRIORITY_TILE_EXECUTOR,
+                lowSpec ? LOW_SPEC_PRIORITY_POOL_SIZE : PRIORITY_POOL_SIZE);
         trimCache(MinecraftClient.getInstance());
+    }
+
+    private static void resizeExecutor(ThreadPoolExecutor executor, int size) {
+        if (size > executor.getMaximumPoolSize()) {
+            executor.setMaximumPoolSize(size);
+            executor.setCorePoolSize(size);
+        } else {
+            executor.setCorePoolSize(size);
+            executor.setMaximumPoolSize(size);
+        }
     }
 
     /** Which Dynmap "world" the player's current Minecraft dimension corresponds to,
@@ -130,6 +163,12 @@ public final class LiveAtlasTileManager {
 
     public static boolean render(DrawContext context, int x, int y, int width, int height,
                                  double playerX, double playerZ, int requestedZoom) {
+        return render(context, x, y, width, height, playerX, playerZ, requestedZoom, false);
+    }
+
+    public static boolean render(DrawContext context, int x, int y, int width, int height,
+                                 double playerX, double playerZ, int requestedZoom,
+                                 boolean highPriority) {
         // Every dimension's tiles now live under their own "/tiles/<world>/..." path
         // (see currentDynmapWorld), instead of every non-overworld dimension being
         // treated as unsupported. That blanket rule used to also cover World PvP,
@@ -155,7 +194,9 @@ public final class LiveAtlasTileManager {
         int lastTileY = floorDiv((int) Math.floor(top + height), TILE_SIZE);
         boolean drewAny = false;
         boolean missingAny = false;
+        boolean missingExactTile = false;
         long now = System.nanoTime();
+        if (highPriority) priorityViewUntilNanos = now + PRIORITY_VIEW_HOLD_NANOS;
         cleanupMetadata(now);
 
         // The same update request used for live player positions also contains the
@@ -171,26 +212,35 @@ public final class LiveAtlasTileManager {
         // Do not let a burst of completed HTTP requests upload every texture in one
         // client tick. Prioritize the current viewport within a small per-frame
         // budget, then use any spare slots for prefetched or previously visible tiles.
-        uploadReadyTiles(tileOrder.keys, width >= 600 ? 4 : 2,
-                width >= 600 ? 2_000_000L : 1_000_000L);
+        uploadReadyTiles(tileOrder.keys,
+                highPriority ? 8 : width >= 600 ? 6 : 3,
+                highPriority ? 4_000_000L : width >= 600 ? 3_000_000L : 1_500_000L);
 
         context.enableScissor(x, y, x + width, y + height);
         for (TileKey key : tileOrder.keys) {
+            int drawX = x + (int) Math.floor(key.x * TILE_SIZE - left);
+            int drawY = y + (int) Math.floor(key.y * TILE_SIZE - top);
             Tile tile = TILES.get(key);
             if (tile == null) {
-                missingAny = true;
-                request(key, 0L);
+                missingExactTile = true;
+                request(key, 0L, highPriority);
+                // Zoom levels use separate LiveAtlas images. Reuse an already cached
+                // neighbouring level until the requested image arrives, rather than
+                // replacing an otherwise usable map with the loading screen after each
+                // mouse-wheel step. The exact-resolution request above still continues
+                // in the background and replaces this temporary fallback automatically.
+                boolean drewFallback = drawZoomFallback(context, key, drawX, drawY, now);
+                drewAny |= drewFallback;
+                missingAny |= !drewFallback;
                 continue;
             }
             long updateVersion = UPDATE_VERSIONS.getOrDefault(key, 0L);
             if (tile.version < updateVersion) {
-                request(key, updateVersion);
+                request(key, updateVersion, highPriority);
             } else if (now - tile.loadedAt > FALLBACK_REFRESH_NANOS) {
-                request(key, System.currentTimeMillis());
+                request(key, System.currentTimeMillis(), highPriority);
             }
             tile.lastUsed = now;
-            int drawX = x + (int) Math.floor(key.x * TILE_SIZE - left);
-            int drawY = y + (int) Math.floor(key.y * TILE_SIZE - top);
             PlatformCompat.drawTexture(context, tile.textureId, drawX, drawY, 0, 0,
                     TILE_SIZE, TILE_SIZE, TILE_SIZE, TILE_SIZE);
             drewAny = true;
@@ -201,9 +251,14 @@ public final class LiveAtlasTileManager {
         // then reveal already-cached tiles instead of showing another loading pause.
         // 저사양 모드 skips this entirely — it's a "nice to have" that trades some
         // bandwidth/CPU for smoother panning, exactly the kind of thing to cut first.
-        if (!missingAny && !tileOrder.prefetched && !PlanetEarthMinimapClient.config.lowSpecMode) {
+        if (!missingExactTile && !tileOrder.prefetched
+                && !PlanetEarthMinimapClient.config.lowSpecMode) {
+            // The next zoom-out shows a wider world area that the current fine tiles
+            // cannot cover. Warm that one level first so both scroll directions feel
+            // immediate; zooming in can already reuse the current coarser tiles.
+            prefetchNextZoomOut(world, zoom, playerX, playerZ, width, height, highPriority);
             prefetchBorder(world, zoom, firstTileX, lastTileX, firstTileY, lastTileY,
-                    centerTileX, centerTileY);
+                    centerTileX, centerTileY, highPriority);
             tileOrder.prefetched = true;
         }
         // Callers use this as the loading-state signal. A single cached tile is not
@@ -244,7 +299,15 @@ public final class LiveAtlasTileManager {
     }
 
     private static void request(TileKey key, long requestedVersion) {
+        request(key, requestedVersion, false);
+    }
+
+    private static void request(TileKey key, long requestedVersion, boolean highPriority) {
         long now = System.nanoTime();
+        // While the auxiliary map is visible, its centre-first visible requests own the
+        // pipeline. Background border/next-zoom prefetch resumes a fraction of a second
+        // after the map closes, without needing any explicit close callback.
+        if (!highPriority && now < priorityViewUntilNanos) return;
         Long retryAfter = RETRY_AFTER.get(key);
         if (retryAfter != null && now < retryAfter) return;
         // Returning here is also important for allocation pressure: the old code
@@ -252,7 +315,9 @@ public final class LiveAtlasTileManager {
         // was pending. A large full-map viewport could therefore build thousands of
         // duplicate callbacks before a slow tile finished.
         if (PENDING.containsKey(key)) return;
-        if (PENDING.size() >= maxPendingRequests()) return;
+        int pendingLimit = maxPendingRequests()
+                + (highPriority ? PRIORITY_EXTRA_PENDING : 0);
+        if (PENDING.size() >= pendingLimit) return;
 
         CompletableFuture<Void> lifecycle = new CompletableFuture<>();
         if (PENDING.putIfAbsent(key, lifecycle) != null) return;
@@ -276,7 +341,8 @@ public final class LiveAtlasTileManager {
                     .header("Referer", base + "/")
                     .GET()
                     .build();
-            HTTP.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofByteArray())
+            (highPriority ? PRIORITY_HTTP : HTTP)
+                    .sendAsync(httpRequest, HttpResponse.BodyHandlers.ofByteArray())
                     .thenApplyAsync(response -> {
                         if (response.statusCode() != 200
                                 || response.body().length <= EMPTY_TILE_MAX_BYTES) {
@@ -287,7 +353,7 @@ public final class LiveAtlasTileManager {
                             return null;
                         }
                         return decode(response.body());
-                    }, TILE_EXECUTOR)
+                    }, highPriority ? PRIORITY_TILE_EXECUTOR : TILE_EXECUTOR)
                     .thenAccept(image -> {
                         if (image == null) {
                             lifecycle.complete(null);
@@ -349,7 +415,8 @@ public final class LiveAtlasTileManager {
     }
 
     private static void prefetchBorder(String world, int zoom, int firstX, int lastX,
-                                       int firstY, int lastY, double centerX, double centerY) {
+                                       int firstY, int lastY, double centerX, double centerY,
+                                       boolean highPriority) {
         List<TileKey> border = new ArrayList<>();
         for (int x = firstX - 1; x <= lastX + 1; x++) {
             border.add(new TileKey(world, zoom, x, firstY - 1));
@@ -362,8 +429,96 @@ public final class LiveAtlasTileManager {
         border.sort(Comparator.comparingDouble(key ->
                 square(key.x + 0.5 - centerX) + square(key.y + 0.5 - centerY)));
         for (TileKey key : border) {
-            if (!TILES.containsKey(key)) request(key, 0L);
+            if (!TILES.containsKey(key)) request(key, 0L, highPriority);
         }
+    }
+
+    private static void prefetchNextZoomOut(String world, int zoom,
+                                            double playerX, double playerZ,
+                                            int width, int height,
+                                            boolean highPriority) {
+        if (zoom >= 7) return;
+        int nextZoom = zoom + 1;
+        int zoomFactor = 1 << nextZoom;
+        double centerMapX = playerX * MAP_SCALE / zoomFactor;
+        double centerMapY = (TILE_SIZE + playerZ * MAP_SCALE) / zoomFactor;
+        double left = centerMapX - width / 2.0;
+        double top = centerMapY - height / 2.0;
+        int firstX = floorDiv((int) Math.floor(left), TILE_SIZE);
+        int lastX = floorDiv((int) Math.floor(left + width), TILE_SIZE);
+        int firstY = floorDiv((int) Math.floor(top), TILE_SIZE);
+        int lastY = floorDiv((int) Math.floor(top + height), TILE_SIZE);
+        double centerX = centerMapX / TILE_SIZE;
+        double centerY = centerMapY / TILE_SIZE;
+
+        List<TileKey> keys = new ArrayList<>((lastX - firstX + 1) * (lastY - firstY + 1));
+        for (int tileY = firstY; tileY <= lastY; tileY++) {
+            for (int tileX = firstX; tileX <= lastX; tileX++) {
+                TileKey key = new TileKey(world, nextZoom, tileX, tileY);
+                if (!TILES.containsKey(key)) keys.add(key);
+            }
+        }
+        keys.sort(Comparator.comparingDouble(key ->
+                square(key.x + 0.5 - centerX) + square(key.y + 0.5 - centerY)));
+        for (TileKey key : keys) request(key, 0L, highPriority);
+    }
+
+    /**
+     * Covers one missing tile from a cached neighbouring zoom. A coarser parent is a
+     * single cropped texture; a finer level is usable only when all four children are
+     * cached so the tile is never left partially blank. Returns true only for complete
+     * coverage, which lets callers suppress the loading overlay safely.
+     */
+    private static boolean drawZoomFallback(DrawContext context, TileKey key,
+                                            int drawX, int drawY, long now) {
+        // Prefer the closest cached coarser level. Three levels still leave a useful
+        // 16x16 source region while covering fast multi-notch wheel input.
+        int maximumAncestor = Math.min(7, key.zoom + 3);
+        for (int ancestorZoom = key.zoom + 1;
+             ancestorZoom <= maximumAncestor; ancestorZoom++) {
+            int factor = 1 << (ancestorZoom - key.zoom);
+            TileKey parentKey = new TileKey(key.world, ancestorZoom,
+                    floorDiv(key.x, factor), floorDiv(key.y, factor));
+            Tile parent = TILES.get(parentKey);
+            if (parent == null) continue;
+
+            int sourceSize = TILE_SIZE / factor;
+            int sourceX = Math.floorMod(key.x, factor) * sourceSize;
+            int sourceY = Math.floorMod(key.y, factor) * sourceSize;
+            parent.lastUsed = now;
+            PlatformCompat.drawTextureRegion(context, parent.textureId,
+                    drawX, drawY, TILE_SIZE, TILE_SIZE,
+                    sourceX, sourceY, sourceSize, sourceSize,
+                    TILE_SIZE, TILE_SIZE);
+            return true;
+        }
+
+        if (key.zoom <= 0) return false;
+        int childZoom = key.zoom - 1;
+        int childBaseX = key.x * 2;
+        int childBaseY = key.y * 2;
+        Tile topLeft = TILES.get(new TileKey(key.world, childZoom, childBaseX, childBaseY));
+        Tile topRight = TILES.get(new TileKey(key.world, childZoom, childBaseX + 1, childBaseY));
+        Tile bottomLeft = TILES.get(new TileKey(key.world, childZoom, childBaseX, childBaseY + 1));
+        Tile bottomRight = TILES.get(new TileKey(key.world, childZoom, childBaseX + 1, childBaseY + 1));
+        if (topLeft == null || topRight == null || bottomLeft == null || bottomRight == null) {
+            return false;
+        }
+
+        int half = TILE_SIZE / 2;
+        drawFineFallback(context, topLeft, drawX, drawY, half, now);
+        drawFineFallback(context, topRight, drawX + half, drawY, half, now);
+        drawFineFallback(context, bottomLeft, drawX, drawY + half, half, now);
+        drawFineFallback(context, bottomRight, drawX + half, drawY + half, half, now);
+        return true;
+    }
+
+    private static void drawFineFallback(DrawContext context, Tile tile,
+                                         int x, int y, int size, long now) {
+        tile.lastUsed = now;
+        PlatformCompat.drawTextureRegion(context, tile.textureId,
+                x, y, size, size, 0, 0, TILE_SIZE, TILE_SIZE,
+                TILE_SIZE, TILE_SIZE);
     }
 
     private static String activeKey(TileKey key) {
