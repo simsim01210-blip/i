@@ -45,6 +45,23 @@ public final class LiveAtlasTileManager {
     private static final double MAP_SCALE = 4.0;
     private static final long FALLBACK_REFRESH_NANOS = Duration.ofMinutes(10).toNanos();
     private static final long EMPTY_RETRY_NANOS = Duration.ofSeconds(5).toNanos();
+    // Open ocean far from anywhere a player has actually sailed is often genuinely
+    // never rendered server-side at all (LiveAtlas only draws chunks someone has
+    // loaded), not just "still rendering" — retrying that at a flat 5 seconds forever
+    // meant the loading indicator kept popping back on indefinitely every time a tile
+    // like that re-entered view. Backing off exponentially per tile (still capped, and
+    // still reset the moment a real image ever does arrive) turns that into an
+    // occasional retry instead of a repeating flicker, without ever fully giving up in
+    // case the area gets explored and rendered later.
+    private static final long EMPTY_RETRY_MAX_NANOS = Duration.ofMinutes(3).toNanos();
+    private static final Map<TileKey, Integer> EMPTY_STREAK = new ConcurrentHashMap<>();
+    // After this many empty responses in a row for the same tile, stop counting it as
+    // "still loading" for the purposes of the loading indicator — one confirmed-absent
+    // tile at the edge of an otherwise fully loaded view (the common shape of this:
+    // sailing along a coastline, where most of the view is real rendered map and only
+    // the open-ocean edge is unrendered) used to keep the whole map's loading overlay
+    // up indefinitely, hiding the perfectly good tiles under it too.
+    private static final int CONFIRMED_EMPTY_STREAK = 2;
     // Every one of these threads can be doing CPU-bound WebP/pixel decode work (see
     // decode() below) at the same time as the render thread, not just idle I/O waiting.
     // The old floor of 6 (up to 16) meant even a modest CPU had most of its cores busy
@@ -231,7 +248,12 @@ public final class LiveAtlasTileManager {
                 // in the background and replaces this temporary fallback automatically.
                 boolean drewFallback = drawZoomFallback(context, key, drawX, drawY, now);
                 drewAny |= drewFallback;
-                missingAny |= !drewFallback;
+                // A tile that has come back empty/unrendered several times running is
+                // very likely genuinely absent server-side (unexplored ocean LiveAtlas
+                // has no chunk data for), not merely slow to arrive — past that point,
+                // don't let it hold the whole map's loading indicator up forever.
+                boolean confirmedAbsent = EMPTY_STREAK.getOrDefault(key, 0) >= CONFIRMED_EMPTY_STREAK;
+                if (!confirmedAbsent) missingAny |= !drewFallback;
                 continue;
             }
             long updateVersion = UPDATE_VERSIONS.getOrDefault(key, 0L);
@@ -349,7 +371,11 @@ public final class LiveAtlasTileManager {
                             // LiveAtlas answers with HTTP 200 and a ~116-byte solid-blue
                             // WebP for tiles that have not been rendered. Treat it as
                             // missing instead of a successfully loaded map tile.
-                            RETRY_AFTER.put(key, System.nanoTime() + EMPTY_RETRY_NANOS);
+                            int streak = EMPTY_STREAK.merge(key, 1, Integer::sum);
+                            long delay = (long) Math.min(
+                                    EMPTY_RETRY_NANOS * (1L << Math.min(streak - 1, 20)),
+                                    EMPTY_RETRY_MAX_NANOS);
+                            RETRY_AFTER.put(key, System.nanoTime() + delay);
                             return null;
                         }
                         return decode(response.body());
@@ -569,6 +595,7 @@ public final class LiveAtlasTileManager {
     private static void upload(TileKey key, NativeImage image, long version) {
         MinecraftClient client = MinecraftClient.getInstance();
         RETRY_AFTER.remove(key);
+        EMPTY_STREAK.remove(key);
 
         // Dynamic tile paths are deterministic. Registering a refreshed image therefore
         // replaces the texture under the same Identifier. Destroy the old registration
@@ -601,6 +628,7 @@ public final class LiveAtlasTileManager {
                 if (!PENDING.containsKey(oldest.getKey())) {
                     UPDATE_VERSIONS.remove(oldest.getKey());
                     RETRY_AFTER.remove(oldest.getKey());
+                    EMPTY_STREAK.remove(oldest.getKey());
                     ACTIVE_BY_PATH.remove(activeKey(oldest.getKey()), oldest.getKey());
                 }
             }
