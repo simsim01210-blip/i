@@ -169,6 +169,7 @@ public final class LiveAtlasTileManager {
         Identifier id = client.world.getRegistryKey().getValue();
         if (id.equals(World.OVERWORLD.getValue())) return "world";
         if ("worldpvp".equals(id.getPath())) return "worldpvp";
+        if ("moon".equals(id.getPath())) return "moon";
         return null;
     }
 
