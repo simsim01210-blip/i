@@ -44,6 +44,11 @@ abstract class FullMapScreenBase extends Screen {
     private ButtonWidget areaLabelButton;
     private ButtonWidget boldLabelButton;
     private ButtonWidget waypointButton;
+    private int coordNavHeadingY;
+    private TextFieldWidget coordNavXField;
+    private TextFieldWidget coordNavZField;
+    private String coordNavXText = "";
+    private String coordNavZText = "";
     // Captured live from rebuildSidebar() instead of hand-counted from row heights —
     // a hardcoded formula here silently drifted out of sync (and started overlapping
     // the button below it) the last two times a row was added above this section.
@@ -198,6 +203,35 @@ abstract class FullMapScreenBase extends Screen {
         }).dimensions(panelX, y, controlWidth, 20).build());
         y += 22;
 
+        // Same gap-then-heading pattern as "내 웨이포인트" below — captured live for
+        // the same reason (a hardcoded offset silently drifts as rows get added above
+        // it). Coordinates are always read against whatever dimension the player is
+        // currently standing in — NavigationManager itself has no concept of world,
+        // it just tracks a raw X/Z target, so typing coordinates here always means
+        // "here, in my current world" the same way clicking the map does.
+        y += 14;
+        coordNavHeadingY = y - 12;
+        int coordFieldWidth = (controlWidth - 8) / 2;
+        coordNavXField = new TextFieldWidget(textRenderer, panelX, y, coordFieldWidth, 20,
+                Text.literal("X 좌표"));
+        coordNavXField.setMaxLength(12);
+        coordNavXField.setPlaceholder(Text.literal("X"));
+        coordNavXField.setText(coordNavXText);
+        coordNavXField.setChangedListener(value -> coordNavXText = value);
+        addDrawableChild(coordNavXField);
+        coordNavZField = new TextFieldWidget(textRenderer, panelX + coordFieldWidth + 8, y,
+                coordFieldWidth, 20, Text.literal("Z 좌표"));
+        coordNavZField.setMaxLength(12);
+        coordNavZField.setPlaceholder(Text.literal("Z"));
+        coordNavZField.setText(coordNavZText);
+        coordNavZField.setChangedListener(value -> coordNavZText = value);
+        addDrawableChild(coordNavZField);
+        y += 22;
+        addDrawableChild(ButtonWidget.builder(Text.literal("좌표로 길안내"), pressed -> {
+            startNavigationToTypedCoordinates();
+        }).dimensions(panelX, y, controlWidth, 20).build());
+        y += 22;
+
         // A blank gap first (matches the categories → player-search spacing above) so
         // the heading below actually has room to sit in, instead of overlapping
         // whatever row came right before it — captured live rather than hand-counted
@@ -259,6 +293,47 @@ abstract class FullMapScreenBase extends Screen {
         if (sidebarScroll > sidebarMaxScroll) {
             sidebarScroll = sidebarMaxScroll;
         }
+    }
+
+    /** Starts (or, if already navigating, adds a via point for) the coordinates typed
+     *  into the two sidebar fields — always against the player's current dimension,
+     *  the same as NavigationManager already assumes for a map click, since it only
+     *  ever tracks a raw X/Z target and has no notion of which world that belongs to. */
+    private void startNavigationToTypedCoordinates() {
+        Double x = parseCoordinateField(coordNavXText);
+        Double z = parseCoordinateField(coordNavZText);
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (x == null || z == null) {
+            if (client.player != null) {
+                client.player.sendMessage(Text.literal("좌표를 숫자로 입력해주세요"), true);
+            }
+            return;
+        }
+        MinimapEditorScreen.playControlSound();
+        String label = "좌표 (" + formatCoordinateLabel(x) + ", " + formatCoordinateLabel(z) + ")";
+        if (NavigationManager.isActive()) {
+            NavigationManager.addVia(label, x, z);
+        } else {
+            NavigationManager.start(label, x, z);
+        }
+    }
+
+    private static Double parseCoordinateField(String text) {
+        if (text == null) return null;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) return null;
+        try {
+            double value = Double.parseDouble(trimmed);
+            return Double.isFinite(value) ? value : null;
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
+    private static String formatCoordinateLabel(double value) {
+        return Math.abs(value - Math.round(value)) < 0.001
+                ? String.valueOf(Math.round(value))
+                : String.format(Locale.ROOT, "%.1f", value);
     }
 
     private void rebuildMarkerBrowser(int panelX, int controlWidth) {
@@ -542,6 +617,8 @@ abstract class FullMapScreenBase extends Screen {
         if (openedCategory == null && !playerBrowserOpen) {
             context.drawTextWithShadow(textRenderer, Text.literal("사이트 영역 / 마커"),
                     mapWidth + 10, 19, 0xFFBFBFBF);
+            context.drawTextWithShadow(textRenderer, Text.literal("좌표로 길안내"),
+                    mapWidth + 10, coordNavHeadingY, 0xFF7FD8FF);
             context.drawTextWithShadow(textRenderer, Text.literal("내 웨이포인트"),
                     mapWidth + 10, waypointHeadingY, 0xFFFFD95A);
         } else if (playerBrowserOpen) {
