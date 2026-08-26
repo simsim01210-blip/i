@@ -22,6 +22,21 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        try {
+            initializeUnsafe();
+        } catch (Throwable error) {
+            // A broken mod initializer can otherwise take Fabric's whole startup
+            // sequence down with it. config keeps whatever load() already managed to
+            // produce (it's self-guarded and always returns a usable object on its
+            // own), so anything that got through above this point still works even if
+            // a later step — a keybinding conflict, an event registration issue — did
+            // not; anything below simply never gets wired up instead of crashing.
+            LOGGER.error("PlanetEarth Minimap 초기화 중 오류가 발생했습니다", error);
+            if (config == null) config = new MinimapConfig();
+        }
+    }
+
+    private void initializeUnsafe() {
         config = MinimapConfig.load();
         LiveAtlasTileManager.applyLowSpecMode(config.lowSpecMode);
         editKey = KeyBindingHelper.registerKeyBinding(InputCompat.createKeyBinding(
