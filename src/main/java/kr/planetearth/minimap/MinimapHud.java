@@ -380,15 +380,32 @@ public final class MinimapHud {
         // loss, so it gets its own off switch rather than being unconditional, and
         // 저사양 모드 forces it off outright regardless of that individual setting.
         if (client.player != null && config.showAreaOverlay && !config.lowSpecMode) {
-            // Same oversized-then-clipped treatment as the tile mosaic above (see
-            // contentX/contentY/contentWidth/contentHeight): without it, territory
-            // colour only ever covered the original, un-rotated square, so a rotated
-            // corner region could show plain tile with no claim tint even though the
-            // real map underneath does have a claim there — visible as a patch that
-            // looks emptier than its surroundings once the map had spun.
-            if (rotating) context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
-            LiveAtlasMarkerManager.renderAreaOverlay(context, contentX, contentY,
-                    contentWidth, contentHeight, playerX, playerZ, zoom, contentRotation);
+            // Also needs the rotated corners covered (see contentX/contentY above), but
+            // NOT contentWidth/contentHeight itself: that box is deliberately the
+            // tightest one for the *exact current* angle, which is perfect for the tile
+            // mosaic (cheap to redraw, keyed by world tile coordinates either way) but
+            // poison for this layer's own cache — AreaRenderCache only hits on an exact
+            // width/height match, so a box that reshapes by a pixel or two every single
+            // frame while simply turning the camera defeated the cache completely and
+            // forced a full territory-fill recompute (the most expensive layer in the
+            // whole mod) every frame, not just when actually panning. A full
+            // diagonal-sized square is bigger than strictly needed at most angles, but
+            // it's constant while rotating, so the cache keeps hitting across frames.
+            int areaBoxX = clampedX;
+            int areaBoxY = clampedY;
+            int areaBoxWidth = width;
+            int areaBoxHeight = height;
+            if (rotating) {
+                int diagonal = evenCeiling(
+                        Math.sqrt((double) width * width + (double) height * height) + 2.0);
+                areaBoxWidth = diagonal;
+                areaBoxHeight = diagonal;
+                areaBoxX = centerX - diagonal / 2;
+                areaBoxY = centerY - diagonal / 2;
+                context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
+            }
+            LiveAtlasMarkerManager.renderAreaOverlay(context, areaBoxX, areaBoxY,
+                    areaBoxWidth, areaBoxHeight, playerX, playerZ, zoom, contentRotation);
             if (rotating) context.disableScissor();
         }
 
