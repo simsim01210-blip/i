@@ -199,6 +199,20 @@ abstract class MinimapEditorScreenBase extends Screen {
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+        // Vanilla calls this directly every frame the screen is open — see
+        // FullMapScreen's identical guard for why this can't be allowed to propagate.
+        try {
+            renderUnsafe(context, mouseX, mouseY, delta);
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.error("미니맵 편집 화면 렌더링 중 오류가 발생했습니다", error);
+            context.fill(0, 0, width, height, 0xFF101010);
+            context.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal("편집 화면을 표시하는 중 오류가 발생했습니다. ESC로 닫아주세요."),
+                    width / 2, height / 2, 0xFFFF5555);
+        }
+    }
+
+    private void renderUnsafe(DrawContext context, int mouseX, int mouseY, float delta) {
         context.fill(0, 0, width, height, 0xB0101010);
         MinimapConfig config = PlanetEarthMinimapClient.config;
 
@@ -333,9 +347,13 @@ abstract class MinimapEditorScreenBase extends Screen {
 
     @Override
     public void close() {
-        fitToScreen();
-        PlanetEarthMinimapClient.config.save();
-        playOpenCloseSound();
+        try {
+            fitToScreen();
+            PlanetEarthMinimapClient.config.save();
+            playOpenCloseSound();
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.error("미니맵 편집 화면 닫기 처리 중 오류가 발생했습니다", error);
+        }
         super.close();
     }
 

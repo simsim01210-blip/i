@@ -34,24 +34,40 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
         // The callback's second parameter is float on 1.20.x and
         // RenderTickCounter on 1.21.x. It is not needed for this HUD, so keep it
         // inside an inferred lambda instead of leaking either type into our API.
-        HudRenderCallback.EVENT.register((context, ignoredTickCounter) -> MinimapHud.render(context));
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            NavigationManager.tick(client);
-            while (editKey.wasPressed()) {
-                MinimapEditorScreen.playOpenCloseSound();
-                if (client.currentScreen instanceof MinimapEditorScreen) {
-                    client.setScreen(null);
-                } else {
-                    client.setScreen(new MinimapEditorScreen());
-                }
+        // Every one of these three registrations is called directly by the game
+        // engine every frame/tick/scroll — an exception escaping any of them (from
+        // anywhere in this mod, now or in some future change) would otherwise crash
+        // Minecraft itself, not just break the minimap. Catching Throwable here is a
+        // deliberate last-resort net around the mod's entire rendering/input surface:
+        // log it and skip that one frame/tick/scroll instead of taking the game down.
+        HudRenderCallback.EVENT.register((context, ignoredTickCounter) -> {
+            try {
+                MinimapHud.render(context);
+            } catch (Throwable error) {
+                LOGGER.error("미니맵 렌더링 중 오류가 발생해 이번 프레임을 건너뜁니다", error);
             }
-            while (fullMapKey.wasPressed()) {
-                if (client.currentScreen instanceof FullMapScreenBase screen) {
-                    if (screen.isSearchInputFocused()) continue;
-                    client.setScreen(null);
-                } else {
-                    client.setScreen(new FullMapScreen());
+        });
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            try {
+                NavigationManager.tick(client);
+                while (editKey.wasPressed()) {
+                    MinimapEditorScreen.playOpenCloseSound();
+                    if (client.currentScreen instanceof MinimapEditorScreen) {
+                        client.setScreen(null);
+                    } else {
+                        client.setScreen(new MinimapEditorScreen());
+                    }
                 }
+                while (fullMapKey.wasPressed()) {
+                    if (client.currentScreen instanceof FullMapScreenBase screen) {
+                        if (screen.isSearchInputFocused()) continue;
+                        client.setScreen(null);
+                    } else {
+                        client.setScreen(new FullMapScreen());
+                    }
+                }
+            } catch (Throwable error) {
+                LOGGER.error("미니맵 틱 처리 중 오류가 발생했습니다", error);
             }
         });
 
@@ -67,11 +83,25 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
             GLFWScrollCallback[] previousHolder = new GLFWScrollCallback[1];
             GLFWScrollCallback previous = GLFW.glfwSetScrollCallback(windowHandle,
                     (GLFWScrollCallbackI) (window, xoffset, yoffset) -> {
-                        if (overlayMapKey.isPressed()) {
-                            OverlayMap.handleScroll(yoffset);
+                        // A raw GLFW callback is a native boundary — an uncaught Java
+                        // exception escaping it is worse than an ordinary crash, so this
+                        // is guarded even more defensively than the other two hooks
+                        // above, including the call into whatever mod installed the
+                        // previous callback.
+                        try {
+                            if (overlayMapKey.isPressed()) {
+                                OverlayMap.handleScroll(yoffset);
+                                return;
+                            }
+                        } catch (Throwable error) {
+                            LOGGER.error("보조 맵 스크롤 처리 중 오류가 발생했습니다", error);
                             return;
                         }
-                        if (previousHolder[0] != null) previousHolder[0].invoke(window, xoffset, yoffset);
+                        try {
+                            if (previousHolder[0] != null) previousHolder[0].invoke(window, xoffset, yoffset);
+                        } catch (Throwable error) {
+                            LOGGER.error("이전 스크롤 콜백 처리 중 오류가 발생했습니다", error);
+                        }
                     });
             previousHolder[0] = previous;
         });

@@ -495,6 +495,21 @@ abstract class FullMapScreenBase extends Screen {
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+        // Vanilla calls this directly every frame the screen is open — a bug anywhere
+        // in this large method (or anything it calls into: tiles, markers, players,
+        // popups...) would otherwise crash the whole game, not just this screen.
+        try {
+            renderUnsafe(context, mouseX, mouseY, delta);
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.error("전체 지도 화면 렌더링 중 오류가 발생했습니다", error);
+            context.fill(0, 0, width, height, 0xFF101010);
+            context.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal("지도를 표시하는 중 오류가 발생했습니다. ESC로 닫아주세요."),
+                    width / 2, height / 2, 0xFFFF5555);
+        }
+    }
+
+    private void renderUnsafe(DrawContext context, int mouseX, int mouseY, float delta) {
         if (playerBrowserOpen
                 && openedPlayerRosterRevision != LiveAtlasPlayerManager.rosterRevision()) {
             rebuildPlayerResults(width - SIDEBAR_WIDTH + 8, SIDEBAR_WIDTH - 16);
@@ -1056,14 +1071,24 @@ abstract class FullMapScreenBase extends Screen {
     }
 
     public boolean mouseScrolled(double mouseX, double mouseY, double amount) {
-        return handleMouseScrolled(mouseX, mouseY, amount);
+        try {
+            return handleMouseScrolled(mouseX, mouseY, amount);
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.error("전체 지도 스크롤 처리 중 오류가 발생했습니다", error);
+            return true;
+        }
     }
 
     // Minecraft 1.20.2+ added a horizontal scroll component. Keeping both
     // overloads lets the same source compile on both sides of that API change.
     public boolean mouseScrolled(double mouseX, double mouseY,
                                  double horizontalAmount, double verticalAmount) {
-        return handleMouseScrolled(mouseX, mouseY, verticalAmount);
+        try {
+            return handleMouseScrolled(mouseX, mouseY, verticalAmount);
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.error("전체 지도 스크롤 처리 중 오류가 발생했습니다", error);
+            return true;
+        }
     }
 
     private boolean handleMouseScrolled(double mouseX, double mouseY, double amount) {
@@ -1171,7 +1196,11 @@ abstract class FullMapScreenBase extends Screen {
 
     @Override
     public void close() {
-        PlanetEarthMinimapClient.config.save();
+        try {
+            PlanetEarthMinimapClient.config.save();
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.error("전체 지도 화면 닫기 처리 중 오류가 발생했습니다", error);
+        }
         super.close();
     }
 
