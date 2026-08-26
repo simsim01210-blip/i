@@ -222,7 +222,12 @@ public final class LiveAtlasPlayerManager {
     static void refreshIfNeeded() {
         long now = System.currentTimeMillis();
         if (now < nextRefresh || !PENDING.compareAndSet(false, true)) return;
-        nextRefresh = now + 500;
+        // Every poll is a network round trip plus a full JSON re-parse of the whole
+        // player roster — 저사양 모드 stretches the interval instead of cutting this
+        // feed outright, since unlike faces/territory colour there's no per-item
+        // toggle to fall back to; player dots just update a little less often.
+        nextRefresh = now + (PlanetEarthMinimapClient.config != null
+                && PlanetEarthMinimapClient.config.lowSpecMode ? 1500 : 500);
         // Follows whichever Dynmap world the player is actually standing in (world,
         // worldpvp, ...) instead of always polling "world" — otherwise the corner
         // minimap kept showing overworld players' dots while standing in World PvP,
