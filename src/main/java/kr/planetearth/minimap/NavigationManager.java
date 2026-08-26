@@ -169,11 +169,16 @@ public final class NavigationManager {
         double shownLength = fullLength * clip;
 
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
-        for (double distance = 5.0; distance < shownLength; distance += 8.0) {
+        // Smaller (2x2, was 3x3) and a touch closer together (7px, was 8px) — the
+        // old dots were chunky enough that each frame's inevitable whole-pixel
+        // rounding as the player moved read as a visible little jump; shrinking them
+        // makes the same 1px snap far less noticeable, and packing them tighter
+        // reads as a smoother line overall.
+        for (double distance = 5.0; distance < shownLength; distance += 7.0) {
             double ratio = distance / fullLength;
             int dotX = (int) Math.round(centerX + pixelX * ratio);
             int dotY = (int) Math.round(centerY + pixelY * ratio);
-            context.fill(dotX - 1, dotY - 1, dotX + 2, dotY + 2, 0xF0FFFFFF);
+            context.fill(dotX - 1, dotY - 1, dotX + 1, dotY + 1, 0xF0FFFFFF);
         }
         int targetX = (int) Math.round(endX);
         int targetY = (int) Math.round(endY);
@@ -257,12 +262,13 @@ public final class NavigationManager {
                 || !clip(dy, maxY - startY, range)) return;
         double shownStart = fullLength * range[0];
         double shownEnd = fullLength * range[1];
-        double firstDot = Math.ceil(shownStart / 9.0) * 9.0;
-        for (double distance = firstDot; distance <= shownEnd; distance += 9.0) {
+        // Same smaller/tighter dots as the minimap's version — see its comment.
+        double firstDot = Math.ceil(shownStart / 7.0) * 7.0;
+        for (double distance = firstDot; distance <= shownEnd; distance += 7.0) {
             double ratio = distance / fullLength;
             int dotX = (int) Math.round(startX + dx * ratio);
             int dotY = (int) Math.round(startY + dy * ratio);
-            context.fill(dotX - 1, dotY - 1, dotX + 2, dotY + 2, 0xF0FFFFFF);
+            context.fill(dotX - 1, dotY - 1, dotX + 1, dotY + 1, 0xF0FFFFFF);
         }
     }
 
