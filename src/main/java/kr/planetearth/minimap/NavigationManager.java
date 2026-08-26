@@ -11,6 +11,10 @@ import java.util.List;
 /** Straight-line HUD guidance to a selected LiveAtlas marker or local waypoint. */
 public final class NavigationManager {
     private static final double ARRIVAL_DISTANCE = 5.0;
+    // Shared by both the minimap/overlay and full-map dashed guidance lines.
+    private static final double DASH_LENGTH = 4.0;
+    private static final double DASH_GAP = 4.0;
+    private static final double DASH_PERIOD = DASH_LENGTH + DASH_GAP;
     private static Target destination;
     private static final List<Target> viaPoints = new ArrayList<>();
 
@@ -169,17 +173,22 @@ public final class NavigationManager {
         double shownLength = fullLength * clip;
 
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
-        // Smaller (2x2, was 3x3) and a touch closer together (7px, was 8px) — the
-        // old dots were chunky enough that each frame's inevitable whole-pixel
-        // rounding as the player moved read as a visible little jump; shrinking them
-        // makes the same 1px snap far less noticeable, and packing them tighter
-        // reads as a smoother line overall.
-        for (double distance = 5.0; distance < shownLength; distance += 7.0) {
-            double ratio = distance / fullLength;
-            int dotX = (int) Math.round(centerX + pixelX * ratio);
-            int dotY = (int) Math.round(centerY + pixelY * ratio);
-            context.fill(dotX - 1, dotY - 1, dotX + 1, dotY + 1, 0xF0FFFFFF);
+        // Actual short dashes instead of square dots: rotate once so the line's own
+        // direction becomes local +X, then every dash is just a thin axis-aligned
+        // rect in that rotated space — no per-dash trig, and it reads as a real
+        // dashed line instead of a row of dots. Scissor still clips it correctly
+        // since it operates in absolute screen space regardless of the active matrix.
+        PlatformCompat.push(context);
+        PlatformCompat.translate(context, centerX, centerY);
+        PlatformCompat.rotate(context, (float) Math.toDegrees(Math.atan2(pixelY, pixelX)));
+        for (double distance = 3.0; distance < shownLength; distance += DASH_PERIOD) {
+            int dashStart = (int) Math.round(distance);
+            int dashEnd = (int) Math.round(Math.min(distance + DASH_LENGTH, shownLength));
+            if (dashEnd > dashStart) {
+                context.fill(dashStart, -1, dashEnd, 1, 0xF0FFFFFF);
+            }
         }
+        PlatformCompat.pop(context);
         int targetX = (int) Math.round(endX);
         int targetY = (int) Math.round(endY);
         context.fill(targetX - 4, targetY - 4, targetX + 5, targetY + 5, 0xE0101010);
@@ -262,14 +271,24 @@ public final class NavigationManager {
                 || !clip(dy, maxY - startY, range)) return;
         double shownStart = fullLength * range[0];
         double shownEnd = fullLength * range[1];
-        // Same smaller/tighter dots as the minimap's version — see its comment.
-        double firstDot = Math.ceil(shownStart / 7.0) * 7.0;
-        for (double distance = firstDot; distance <= shownEnd; distance += 7.0) {
-            double ratio = distance / fullLength;
-            int dotX = (int) Math.round(startX + dx * ratio);
-            int dotY = (int) Math.round(startY + dy * ratio);
-            context.fill(dotX - 1, dotY - 1, dotX + 1, dotY + 1, 0xF0FFFFFF);
+        // Same rotate-once-then-draw-thin-rects dashes as the minimap's version (see
+        // its comment) — phase is anchored to distance 0 (this leg's actual start,
+        // not the visible/clipped window) so the dash pattern doesn't visibly reset
+        // or jump as the view pans and the clip window moves.
+        double angleDegrees = Math.toDegrees(Math.atan2(dy, dx));
+        PlatformCompat.push(context);
+        PlatformCompat.translate(context, (float) startX, (float) startY);
+        PlatformCompat.rotate(context, (float) angleDegrees);
+        double firstDash = Math.floor(shownStart / DASH_PERIOD) * DASH_PERIOD;
+        for (double distance = firstDash; distance < shownEnd; distance += DASH_PERIOD) {
+            double segmentStart = Math.max(distance, shownStart);
+            double segmentEnd = Math.min(distance + DASH_LENGTH, shownEnd);
+            if (segmentEnd > segmentStart) {
+                context.fill((int) Math.round(segmentStart), -1,
+                        (int) Math.round(segmentEnd), 1, 0xF0FFFFFF);
+            }
         }
+        PlatformCompat.pop(context);
     }
 
     private static void drawRoutePoint(DrawContext context, MinecraftClient client,
