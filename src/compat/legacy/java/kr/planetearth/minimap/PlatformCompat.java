@@ -196,15 +196,22 @@ final class PlatformCompat {
     }
 
     static PositionedSoundInstance controlSound(float pitch, float volume) {
-        return PositionedSoundInstance.master(SoundEvents.ENTITY_GENERIC_EAT, pitch, volume);
+        // Vanilla's own generic button-click cue, the same one every stock GUI button
+        // in the game already uses — a much more natural fit for "you pressed a
+        // button" than a reused eating sound.
+        return PositionedSoundInstance.master(SoundEvents.UI_BUTTON_CLICK.value(), pitch, volume);
     }
 
     static PositionedSoundInstance openCloseSound(float pitch, float volume) {
-        return PositionedSoundInstance.master(
-                SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, pitch, volume);
+        // A page turn instead of an XP-orb pickup — this is a map/book-style panel
+        // opening and closing, not a pickup event, and the same sound reads fine
+        // played symmetrically for both open and close.
+        return PositionedSoundInstance.master(SoundEvents.ITEM_BOOK_PAGE_TURN, pitch, volume);
     }
 
     static PositionedSoundInstance navigationCompleteSound(float pitch, float volume) {
-        return PositionedSoundInstance.master(SoundEvents.ENTITY_PLAYER_LEVELUP, pitch, volume);
+        // Vanilla's own "objective complete" toast chime — closer to "you arrived"
+        // than the level-up fanfare, which reads more like an XP/grinding cue.
+        return PositionedSoundInstance.master(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, pitch, volume);
     }
 }
