@@ -133,7 +133,9 @@ public final class NavigationManager {
         }
         destination = null;
         viaPoints.clear();
-        client.getSoundManager().play(PlatformCompat.navigationCompleteSound(1.0f, 0.8f));
+        // Raising pitch above the natural 1.0 plays the same sample back faster (and
+        // therefore shorter), the same trick used for the other two UI sounds.
+        client.getSoundManager().play(PlatformCompat.navigationCompleteSound(1.6f, 0.8f));
         client.player.sendMessage(Text.literal("도착: " + active.name + " · 길 안내 종료"), true);
     }
 

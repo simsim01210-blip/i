@@ -459,7 +459,10 @@ abstract class MinimapEditorScreenBase extends Screen {
     private static void playControlSound(SoundManager soundManager) {
         MinimapConfig config = PlanetEarthMinimapClient.config;
         if (!config.uiSoundsEnabled || config.uiSoundVolumePercent <= 0) return;
-        soundManager.play(PlatformCompat.controlSound(2.0f, configuredVolume(0.55f)));
+        // Minecraft's sound engine plays a higher pitch back faster (it's a simple
+        // resample, not independent time-stretching), so raising pitch is also how to
+        // make a fixed vanilla sample noticeably shorter without a custom audio file.
+        soundManager.play(PlatformCompat.controlSound(2.4f, configuredVolume(0.55f)));
     }
 
     static void playControlSound() {
@@ -469,8 +472,10 @@ abstract class MinimapEditorScreenBase extends Screen {
     public static void playOpenCloseSound() {
         MinimapConfig config = PlanetEarthMinimapClient.config;
         if (!config.uiSoundsEnabled || config.uiSoundVolumePercent <= 0) return;
+        // Was 0.6 (slower/longer than the sample's natural length) — 1.8 instead
+        // trims the page-turn down to a quick flick for both opening and closing.
         MinecraftClient.getInstance().getSoundManager().play(
-                PlatformCompat.openCloseSound(0.6f, configuredVolume(0.35f)));
+                PlatformCompat.openCloseSound(1.8f, configuredVolume(0.35f)));
     }
 
     private static final class IntSlider extends SliderWidget {
