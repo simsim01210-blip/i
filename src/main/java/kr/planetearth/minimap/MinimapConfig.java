@@ -59,8 +59,11 @@ public final class MinimapConfig {
     public int statusBarY = 170;
     public int statusBarScalePercent = 100;
     /** Bundles several individually-heavier settings into one switch for weaker PCs:
-     *  forces the territory colour overlay off, skips prefetching tiles just outside
-     *  the viewport, and shrinks the tile download/decode thread pool. See
+     *  forces the territory colour overlay off, forces rotateWithPlayer/circularShape
+     *  off regardless of their own toggles (rotation's oversized content box and the
+     *  circular mode's extra full-window framebuffer are real GPU/CPU cost on top of
+     *  the ordinary square map), skips prefetching tiles just outside the viewport,
+     *  and shrinks the tile download/decode thread pool. See
      *  {@link PlanetEarthMinimapClient#applyLowSpecMode} for where it's applied. */
     public boolean lowSpecMode = false;
     /** Persistent site marker name labels (기차역/특산품/항구/... and, on the full map

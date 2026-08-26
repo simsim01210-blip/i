@@ -292,7 +292,12 @@ public final class MinimapHud {
                                 boolean highPriorityTiles, boolean allowCircularShape) {
         MinecraftClient client = MinecraftClient.getInstance();
         MinimapConfig config = PlanetEarthMinimapClient.config;
-        boolean circularShape = allowCircularShape && config.circularShape;
+        // Both the circular framebuffer pass and rotation's oversized content box are
+        // real extra GPU/CPU cost on top of the ordinary square map — 저사양 모드 is
+        // the player's explicit "keep this cheap and stable" switch, so it overrides
+        // both regardless of their own toggles, the same way it already forces the
+        // (much older, already known to be heavy) territory colour overlay off below.
+        boolean circularShape = allowCircularShape && config.circularShape && !config.lowSpecMode;
         int frameMargin = circularShape ? 4 : 0;
         int maxX = client.getWindow().getScaledWidth() - width - frameMargin;
         int maxY = client.getWindow().getScaledHeight() - height - frameMargin;
@@ -333,7 +338,7 @@ public final class MinimapHud {
         // — with the map. None of this is extra geometry or draw calls, just the same
         // matrix multiply (or, off the matrix stack, the same amount of trig) already
         // happening for the direction arrow and waypoint label scaling every frame.
-        boolean rotating = config.rotateWithPlayer && client.player != null;
+        boolean rotating = config.rotateWithPlayer && client.player != null && !config.lowSpecMode;
         float contentRotation = rotating ? -(client.player.getYaw() + 180.0f) : 0f;
 
         // Rotating an image with the original viewport dimensions leaves triangular
@@ -527,6 +532,37 @@ public final class MinimapHud {
     private static void drawCircularMap(DrawContext context, int x, int y, int width, int height,
                                         boolean editing, int zoom, int backgroundColor,
                                         LoadingState loading, boolean highPriorityTiles) {
+        try {
+            drawCircularMapUnsafe(context, x, y, width, height, editing, zoom,
+                    backgroundColor, loading, highPriorityTiles);
+        } catch (Throwable error) {
+            // An extra full-window-sized framebuffer is real GPU memory and driver
+            // surface area a weak or old graphics card may simply not have to spare —
+            // this is a real-config toggle players choose themselves, so a failure here
+            // should turn itself off and fall back to the plain square map instead of
+            // taking the whole game down with it.
+            PlanetEarthMinimapClient.LOGGER.warn(
+                    "원형 미니맵 렌더링 실패, 사각형으로 되돌립니다", error);
+            renderingCircularTarget = false;
+            if (circularMapTarget != null) {
+                try {
+                    circularMapTarget.delete();
+                } catch (Throwable cleanupError) {
+                    PlanetEarthMinimapClient.LOGGER.debug(
+                            "Could not clean up circular minimap framebuffer", cleanupError);
+                }
+                circularMapTarget = null;
+            }
+            PlanetEarthMinimapClient.config.circularShape = false;
+            PlanetEarthMinimapClient.config.save();
+            drawMap(context, x, y, width, height, editing, zoom, backgroundColor,
+                    loading, highPriorityTiles, false);
+        }
+    }
+
+    private static void drawCircularMapUnsafe(DrawContext context, int x, int y, int width, int height,
+                                              boolean editing, int zoom, int backgroundColor,
+                                              LoadingState loading, boolean highPriorityTiles) {
         MinecraftClient client = MinecraftClient.getInstance();
         // Width and height can be resized independently in the editor. A circular map
         // must nevertheless use one diameter everywhere; otherwise the source map is
