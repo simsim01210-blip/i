@@ -111,10 +111,14 @@ public final class LiveAtlasPlayerManager {
                                    int mapLeft, int mapRight) {
         MinecraftClient client = MinecraftClient.getInstance();
         MinimapConfig config = PlanetEarthMinimapClient.config;
-        final int headSize = config.showPlayerFaces ? config.playerFaceSize : 0;
+        // Each visible face is its own network download, decode and texture upload —
+        // 저사양 모드 skips them the same way it already skips territory colour and
+        // rotation, falling back to the plain colour swatch below instead.
+        boolean showFaces = config.showPlayerFaces && !config.lowSpecMode;
+        final int headSize = showFaces ? config.playerFaceSize : 0;
         int headX = x - headSize / 2;
         int headY = y - headSize / 2;
-        Identifier face = config.showPlayerFaces ? faceTexture(player.account) : null;
+        Identifier face = showFaces ? faceTexture(player.account) : null;
 
         if (config.showPlayerNames) {
             String label = player.name;
@@ -136,7 +140,7 @@ public final class LiveAtlasPlayerManager {
             PlatformCompat.pop(context);
         }
 
-        if (config.showPlayerFaces) {
+        if (showFaces) {
             context.fill(headX - 1, headY - 1, headX + headSize + 1, headY + headSize + 1, 0xE0000000);
             if (face != null) {
                 // Scale the complete 16x16 face. Passing headSize as the source size would crop it.
