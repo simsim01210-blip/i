@@ -92,19 +92,22 @@ public final class LiveAtlasPlayerManager {
 
         double[] rotated = new double[2];
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
-        for (WebPlayer player : players) {
-            if (player.name.equalsIgnoreCase(localName)) continue;
-            // The dot's position rotates with the map, but drawPlayer draws the face
-            // and nametag with no active rotation (only its own translate/scale), so
-            // both stay upright instead of spinning or flipping as the map turns.
-            MinimapHud.rotateOffset((player.x - localX) * pixelsPerBlock,
-                    (player.z - localZ) * pixelsPerBlock, rotationDegrees, rotated);
-            int x = centerX + (int) Math.round(rotated[0]);
-            int y = centerY + (int) Math.round(rotated[1]);
-            if (x < mapX + 7 || x >= mapX + width - 7 || y < mapY + 7 || y >= mapY + height - 7) continue;
-            drawPlayer(context, player, x, y, mapX, mapX + width);
+        try {
+            for (WebPlayer player : players) {
+                if (player.name.equalsIgnoreCase(localName)) continue;
+                // The dot's position rotates with the map, but drawPlayer draws the face
+                // and nametag with no active rotation (only its own translate/scale), so
+                // both stay upright instead of spinning or flipping as the map turns.
+                MinimapHud.rotateOffset((player.x - localX) * pixelsPerBlock,
+                        (player.z - localZ) * pixelsPerBlock, rotationDegrees, rotated);
+                int x = centerX + (int) Math.round(rotated[0]);
+                int y = centerY + (int) Math.round(rotated[1]);
+                if (x < mapX + 7 || x >= mapX + width - 7 || y < mapY + 7 || y >= mapY + height - 7) continue;
+                drawPlayer(context, player, x, y, mapX, mapX + width);
+            }
+        } finally {
+            context.disableScissor();
         }
-        context.disableScissor();
     }
 
     private static void drawPlayer(DrawContext context, WebPlayer player, int x, int y,

@@ -16,9 +16,26 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.RotationAxis;
 import org.joml.Matrix4f;
+import org.lwjgl.opengl.GL11;
 
 final class PlatformCompat {
     private PlatformCompat() {}
+
+    // Global GL switches are shared with every other mod drawing in the same frame
+    // (HUD overlays, zoom vignettes, tooltips...), so anything toggled here has to be
+    // put back the way it was found — forcing blend off / cull on at the end used to
+    // change the state under whichever mod drew next instead of leaving it untouched.
+    private static boolean blendWasEnabled() { return GL11.glIsEnabled(GL11.GL_BLEND); }
+
+    private static boolean cullWasEnabled() { return GL11.glIsEnabled(GL11.GL_CULL_FACE); }
+
+    private static void restoreBlend(boolean wasEnabled) {
+        if (wasEnabled) RenderSystem.enableBlend(); else RenderSystem.disableBlend();
+    }
+
+    private static void restoreCull(boolean wasEnabled) {
+        if (wasEnabled) RenderSystem.enableCull(); else RenderSystem.disableCull();
+    }
 
     static net.minecraft.util.math.Vec3d cameraPosition(net.minecraft.client.render.Camera camera) {
         return camera.getPos();
@@ -60,10 +77,14 @@ final class PlatformCompat {
     static void drawTranslucentTexture(DrawContext context, Identifier texture,
                                        int x, int y, int u, int v, int width, int height,
                                        int textureWidth, int textureHeight) {
+        boolean blendBefore = blendWasEnabled();
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
-        context.drawTexture(texture, x, y, u, v, width, height, textureWidth, textureHeight);
-        RenderSystem.disableBlend();
+        try {
+            context.drawTexture(texture, x, y, u, v, width, height, textureWidth, textureHeight);
+        } finally {
+            restoreBlend(blendBefore);
+        }
     }
 
     /**
@@ -86,26 +107,31 @@ final class PlatformCompat {
                                       int scaledWidth, int scaledHeight) {
         if (radius <= 0 || scaledWidth <= 0 || scaledHeight <= 0) return;
         context.draw();
+        boolean blendBefore = blendWasEnabled();
+        boolean cullBefore = cullWasEnabled();
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.disableCull();
-        RenderSystem.setShader(GameRenderer::getPositionTexProgram);
-        RenderSystem.setShaderTexture(0, textureId);
+        try {
+            RenderSystem.setShader(GameRenderer::getPositionTexProgram);
+            RenderSystem.setShaderTexture(0, textureId);
 
-        Matrix4f matrix = context.getMatrices().peek().getPositionMatrix();
-        BufferBuilder builder = Tessellator.getInstance().getBuffer();
-        builder.begin(VertexFormat.DrawMode.TRIANGLE_FAN, VertexFormats.POSITION_TEXTURE);
-        addFramebufferVertex(builder, matrix, centerX, centerY, scaledWidth, scaledHeight);
-        final int segments = 128;
-        for (int i = 0; i <= segments; i++) {
-            double angle = Math.PI * 2.0 * i / segments;
-            float x = centerX + (float) Math.cos(angle) * radius;
-            float y = centerY + (float) Math.sin(angle) * radius;
-            addFramebufferVertex(builder, matrix, x, y, scaledWidth, scaledHeight);
+            Matrix4f matrix = context.getMatrices().peek().getPositionMatrix();
+            BufferBuilder builder = Tessellator.getInstance().getBuffer();
+            builder.begin(VertexFormat.DrawMode.TRIANGLE_FAN, VertexFormats.POSITION_TEXTURE);
+            addFramebufferVertex(builder, matrix, centerX, centerY, scaledWidth, scaledHeight);
+            final int segments = 128;
+            for (int i = 0; i <= segments; i++) {
+                double angle = Math.PI * 2.0 * i / segments;
+                float x = centerX + (float) Math.cos(angle) * radius;
+                float y = centerY + (float) Math.sin(angle) * radius;
+                addFramebufferVertex(builder, matrix, x, y, scaledWidth, scaledHeight);
+            }
+            BufferRenderer.drawWithGlobalProgram(builder.end());
+        } finally {
+            restoreCull(cullBefore);
+            restoreBlend(blendBefore);
         }
-        BufferRenderer.drawWithGlobalProgram(builder.end());
-        RenderSystem.enableCull();
-        RenderSystem.disableBlend();
     }
 
     private static void addFramebufferVertex(BufferBuilder builder, Matrix4f matrix,
@@ -121,21 +147,26 @@ final class PlatformCompat {
     static void drawCircularHotbarFrame(DrawContext context, int centerX, int centerY, int radius) {
         if (radius <= 0) return;
         context.draw();
+        boolean blendBefore = blendWasEnabled();
+        boolean cullBefore = cullWasEnabled();
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.disableCull();
-        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+        try {
+            RenderSystem.setShader(GameRenderer::getPositionColorProgram);
 
-        Matrix4f matrix = context.getMatrices().peek().getPositionMatrix();
-        BufferBuilder builder = Tessellator.getInstance().getBuffer();
-        builder.begin(VertexFormat.DrawMode.TRIANGLES, VertexFormats.POSITION_COLOR);
-        addRingBand(builder, matrix, centerX, centerY, radius + 4.0f, radius + 3.0f, 0xF0101010);
-        addRingBand(builder, matrix, centerX, centerY, radius + 3.0f, radius + 1.0f, 0xFF8B8B8B);
-        addRingBand(builder, matrix, centerX, centerY, radius + 1.0f, radius, 0xFFC6C6C6);
-        addRingBand(builder, matrix, centerX, centerY, radius, Math.max(0.0f, radius - 2.0f), 0xFF373737);
-        BufferRenderer.drawWithGlobalProgram(builder.end());
-        RenderSystem.enableCull();
-        RenderSystem.disableBlend();
+            Matrix4f matrix = context.getMatrices().peek().getPositionMatrix();
+            BufferBuilder builder = Tessellator.getInstance().getBuffer();
+            builder.begin(VertexFormat.DrawMode.TRIANGLES, VertexFormats.POSITION_COLOR);
+            addRingBand(builder, matrix, centerX, centerY, radius + 4.0f, radius + 3.0f, 0xF0101010);
+            addRingBand(builder, matrix, centerX, centerY, radius + 3.0f, radius + 1.0f, 0xFF8B8B8B);
+            addRingBand(builder, matrix, centerX, centerY, radius + 1.0f, radius, 0xFFC6C6C6);
+            addRingBand(builder, matrix, centerX, centerY, radius, Math.max(0.0f, radius - 2.0f), 0xFF373737);
+            BufferRenderer.drawWithGlobalProgram(builder.end());
+        } finally {
+            restoreCull(cullBefore);
+            restoreBlend(blendBefore);
+        }
     }
 
     private static void addRingBand(BufferBuilder builder, Matrix4f matrix,

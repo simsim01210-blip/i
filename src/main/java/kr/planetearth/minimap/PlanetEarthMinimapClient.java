@@ -104,7 +104,11 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
                         // above, including the call into whatever mod installed the
                         // previous callback.
                         try {
-                            if (overlayMapKey.isPressed()) {
+                            // Only ever swallow the wheel for the overlay map itself: with
+                            // any screen open (another mod's GUI, a zoom mod's config,
+                            // chat...) the event must reach that screen / mod untouched,
+                            // even if the overlay key happens to still read as held.
+                            if (client.currentScreen == null && overlayMapKey.isPressed()) {
                                 OverlayMap.handleScroll(yoffset);
                                 return;
                             }

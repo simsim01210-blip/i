@@ -357,26 +357,36 @@ public final class MinimapHud {
             contentHeight = evenCeiling(width * absSin + height * absCos + 2.0);
             contentX = centerX - contentWidth / 2;
             contentY = centerY - contentHeight / 2;
-            // Expanded tiles must cover the rotated corners but never bleed past the
-            // actual configured frame into the game HUD.
-            context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
         }
 
-        PlatformCompat.push(context);
-        if (rotating) {
-            PlatformCompat.translate(context, centerX, centerY);
-            PlatformCompat.rotate(context, contentRotation);
-            PlatformCompat.translate(context, -centerX, -centerY);
+        // Expanded tiles must cover the rotated corners but never bleed past the
+        // actual configured frame into the game HUD. Both the scissor and the matrix
+        // push live on the DrawContext that every other mod's HUD shares this frame,
+        // so each is released in a finally — a leftover clip or transform would
+        // otherwise displace whatever those mods draw after us.
+        if (rotating) context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
+        boolean drewMap;
+        try {
+            PlatformCompat.push(context);
+            try {
+                if (rotating) {
+                    PlatformCompat.translate(context, centerX, centerY);
+                    PlatformCompat.rotate(context, contentRotation);
+                    PlatformCompat.translate(context, -centerX, -centerY);
+                }
+                drewMap = client.player != null && LiveAtlasTileManager.render(
+                        context, contentX, contentY, contentWidth, contentHeight,
+                        client.player.getX(), client.player.getZ(), zoom, highPriorityTiles);
+                if (config.showGrid) {
+                    drawChunkGrid(context, contentX, contentY, contentWidth, contentHeight,
+                            playerX, playerZ, zoom);
+                }
+            } finally {
+                PlatformCompat.pop(context);
+            }
+        } finally {
+            if (rotating) context.disableScissor();
         }
-        boolean drewMap = client.player != null && LiveAtlasTileManager.render(
-                context, contentX, contentY, contentWidth, contentHeight,
-                client.player.getX(), client.player.getZ(), zoom, highPriorityTiles);
-        if (config.showGrid) {
-            drawChunkGrid(context, contentX, contentY, contentWidth, contentHeight,
-                    playerX, playerZ, zoom);
-        }
-        PlatformCompat.pop(context);
-        if (rotating) context.disableScissor();
 
         // The most expensive optional layer: dense Towny territory near a city can mean
         // hundreds of semi-transparent fills and boundary lines redrawn every single
@@ -407,11 +417,14 @@ public final class MinimapHud {
                 areaBoxHeight = diagonal;
                 areaBoxX = centerX - diagonal / 2;
                 areaBoxY = centerY - diagonal / 2;
-                context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
             }
-            LiveAtlasMarkerManager.renderAreaOverlay(context, areaBoxX, areaBoxY,
-                    areaBoxWidth, areaBoxHeight, playerX, playerZ, zoom, contentRotation);
-            if (rotating) context.disableScissor();
+            if (rotating) context.enableScissor(clampedX, clampedY, clampedX + width, clampedY + height);
+            try {
+                LiveAtlasMarkerManager.renderAreaOverlay(context, areaBoxX, areaBoxY,
+                        areaBoxWidth, areaBoxHeight, playerX, playerZ, zoom, contentRotation);
+            } finally {
+                if (rotating) context.disableScissor();
+            }
         }
 
         // The small minimap and the overlay map share one loading indicator. Used to
@@ -720,19 +733,22 @@ public final class MinimapHud {
         int centerY = mapY + height / 2;
 
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
-        for (double worldX = firstX; worldX <= maxWorldX; worldX += worldStep) {
-            int screenX = centerX + (int) Math.round((worldX - centerWorldX) * scale);
-            long chunkX = Math.round(worldX / 16.0);
-            int color = Math.floorMod(chunkX, 16) == 0 ? 0x88FFFFFF : 0x55FFFFFF;
-            context.fill(screenX, mapY, screenX + 1, mapY + height, color);
+        try {
+            for (double worldX = firstX; worldX <= maxWorldX; worldX += worldStep) {
+                int screenX = centerX + (int) Math.round((worldX - centerWorldX) * scale);
+                long chunkX = Math.round(worldX / 16.0);
+                int color = Math.floorMod(chunkX, 16) == 0 ? 0x88FFFFFF : 0x55FFFFFF;
+                context.fill(screenX, mapY, screenX + 1, mapY + height, color);
+            }
+            for (double worldZ = firstZ; worldZ <= maxWorldZ; worldZ += worldStep) {
+                int screenY = centerY + (int) Math.round((worldZ - centerWorldZ) * scale);
+                long chunkZ = Math.round(worldZ / 16.0);
+                int color = Math.floorMod(chunkZ, 16) == 0 ? 0x88FFFFFF : 0x55FFFFFF;
+                context.fill(mapX, screenY, mapX + width, screenY + 1, color);
+            }
+        } finally {
+            context.disableScissor();
         }
-        for (double worldZ = firstZ; worldZ <= maxWorldZ; worldZ += worldStep) {
-            int screenY = centerY + (int) Math.round((worldZ - centerWorldZ) * scale);
-            long chunkZ = Math.round(worldZ / 16.0);
-            int color = Math.floorMod(chunkZ, 16) == 0 ? 0x88FFFFFF : 0x55FFFFFF;
-            context.fill(mapX, screenY, mapX + width, screenY + 1, color);
-        }
-        context.disableScissor();
     }
 
     /** Pixel-style bevel matching Minecraft's classic gray hotbar/slot frame. */

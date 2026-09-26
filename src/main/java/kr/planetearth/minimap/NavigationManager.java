@@ -172,29 +172,38 @@ public final class NavigationManager {
         double endY = centerY + pixelY * clip;
         double shownLength = fullLength * clip;
 
+        // Declared out here because the distance label below the scissor block needs them.
+        final int targetX = (int) Math.round(endX);
+        final int targetY = (int) Math.round(endY);
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
-        // Actual short dashes instead of square dots: rotate once so the line's own
-        // direction becomes local +X, then every dash is just a thin axis-aligned
-        // rect in that rotated space — no per-dash trig, and it reads as a real
-        // dashed line instead of a row of dots. Scissor still clips it correctly
-        // since it operates in absolute screen space regardless of the active matrix.
-        PlatformCompat.push(context);
-        PlatformCompat.translate(context, centerX, centerY);
-        PlatformCompat.rotate(context, (float) Math.toDegrees(Math.atan2(pixelY, pixelX)));
-        for (double distance = 3.0; distance < shownLength; distance += DASH_PERIOD) {
-            int dashStart = (int) Math.round(distance);
-            int dashEnd = (int) Math.round(Math.min(distance + DASH_LENGTH, shownLength));
-            if (dashEnd > dashStart) {
-                context.fill(dashStart, -1, dashEnd, 1, 0xF0FFFFFF);
+        try {
+            // Actual short dashes instead of square dots: rotate once so the line's own
+            // direction becomes local +X, then every dash is just a thin axis-aligned
+            // rect in that rotated space — no per-dash trig, and it reads as a real
+            // dashed line instead of a row of dots. Scissor still clips it correctly
+            // since it operates in absolute screen space regardless of the active matrix.
+            // push/pop and enable/disableScissor are both shared with every other mod
+            // drawing this frame, so they're paired in finally blocks.
+            PlatformCompat.push(context);
+            try {
+                PlatformCompat.translate(context, centerX, centerY);
+                PlatformCompat.rotate(context, (float) Math.toDegrees(Math.atan2(pixelY, pixelX)));
+                for (double distance = 3.0; distance < shownLength; distance += DASH_PERIOD) {
+                    int dashStart = (int) Math.round(distance);
+                    int dashEnd = (int) Math.round(Math.min(distance + DASH_LENGTH, shownLength));
+                    if (dashEnd > dashStart) {
+                        context.fill(dashStart, -1, dashEnd, 1, 0xF0FFFFFF);
+                    }
+                }
+            } finally {
+                PlatformCompat.pop(context);
             }
+            context.fill(targetX - 4, targetY - 4, targetX + 5, targetY + 5, 0xE0101010);
+            context.fill(targetX - 2, targetY - 2, targetX + 3, targetY + 3,
+                    showingVia ? 0xFFFF9F43 : 0xFFFFE45C);
+        } finally {
+            context.disableScissor();
         }
-        PlatformCompat.pop(context);
-        int targetX = (int) Math.round(endX);
-        int targetY = (int) Math.round(endY);
-        context.fill(targetX - 4, targetY - 4, targetX + 5, targetY + 5, 0xE0101010);
-        context.fill(targetX - 2, targetY - 2, targetX + 3, targetY + 3,
-                showingVia ? 0xFFFF9F43 : 0xFFFFE45C);
-        context.disableScissor();
 
         MinecraftClient client = MinecraftClient.getInstance();
         double worldDistance = Math.sqrt((active.x - playerX) * (active.x - playerX)

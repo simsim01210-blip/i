@@ -234,41 +234,48 @@ public final class LiveAtlasTileManager {
                 highPriority ? 8 : width >= 600 ? 6 : 3,
                 highPriority ? 4_000_000L : width >= 600 ? 3_000_000L : 1_500_000L);
 
+        // The scissor stack lives on the DrawContext, which every other mod's HUD/screen
+        // drawing in the same frame shares — so it always has to be popped again, even
+        // if something below throws, or the leftover clip rectangle silently cuts off
+        // whatever draws after this mod.
         context.enableScissor(x, y, x + width, y + height);
-        for (TileKey key : tileOrder.keys) {
-            int drawX = x + (int) Math.floor(key.x * TILE_SIZE - left);
-            int drawY = y + (int) Math.floor(key.y * TILE_SIZE - top);
-            Tile tile = TILES.get(key);
-            if (tile == null) {
-                missingExactTile = true;
-                request(key, 0L, highPriority);
-                // Zoom levels use separate LiveAtlas images. Reuse an already cached
-                // neighbouring level until the requested image arrives, rather than
-                // replacing an otherwise usable map with the loading screen after each
-                // mouse-wheel step. The exact-resolution request above still continues
-                // in the background and replaces this temporary fallback automatically.
-                boolean drewFallback = drawZoomFallback(context, key, drawX, drawY, now);
-                drewAny |= drewFallback;
-                // A tile that has come back empty/unrendered several times running is
-                // very likely genuinely absent server-side (unexplored ocean LiveAtlas
-                // has no chunk data for), not merely slow to arrive — past that point,
-                // don't let it hold the whole map's loading indicator up forever.
-                boolean confirmedAbsent = EMPTY_STREAK.getOrDefault(key, 0) >= CONFIRMED_EMPTY_STREAK;
-                if (!confirmedAbsent) missingAny |= !drewFallback;
-                continue;
+        try {
+            for (TileKey key : tileOrder.keys) {
+                int drawX = x + (int) Math.floor(key.x * TILE_SIZE - left);
+                int drawY = y + (int) Math.floor(key.y * TILE_SIZE - top);
+                Tile tile = TILES.get(key);
+                if (tile == null) {
+                    missingExactTile = true;
+                    request(key, 0L, highPriority);
+                    // Zoom levels use separate LiveAtlas images. Reuse an already cached
+                    // neighbouring level until the requested image arrives, rather than
+                    // replacing an otherwise usable map with the loading screen after each
+                    // mouse-wheel step. The exact-resolution request above still continues
+                    // in the background and replaces this temporary fallback automatically.
+                    boolean drewFallback = drawZoomFallback(context, key, drawX, drawY, now);
+                    drewAny |= drewFallback;
+                    // A tile that has come back empty/unrendered several times running is
+                    // very likely genuinely absent server-side (unexplored ocean LiveAtlas
+                    // has no chunk data for), not merely slow to arrive — past that point,
+                    // don't let it hold the whole map's loading indicator up forever.
+                    boolean confirmedAbsent = EMPTY_STREAK.getOrDefault(key, 0) >= CONFIRMED_EMPTY_STREAK;
+                    if (!confirmedAbsent) missingAny |= !drewFallback;
+                    continue;
+                }
+                long updateVersion = UPDATE_VERSIONS.getOrDefault(key, 0L);
+                if (tile.version < updateVersion) {
+                    request(key, updateVersion, highPriority);
+                } else if (now - tile.loadedAt > FALLBACK_REFRESH_NANOS) {
+                    request(key, System.currentTimeMillis(), highPriority);
+                }
+                tile.lastUsed = now;
+                PlatformCompat.drawTexture(context, tile.textureId, drawX, drawY, 0, 0,
+                        TILE_SIZE, TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                drewAny = true;
             }
-            long updateVersion = UPDATE_VERSIONS.getOrDefault(key, 0L);
-            if (tile.version < updateVersion) {
-                request(key, updateVersion, highPriority);
-            } else if (now - tile.loadedAt > FALLBACK_REFRESH_NANOS) {
-                request(key, System.currentTimeMillis(), highPriority);
-            }
-            tile.lastUsed = now;
-            PlatformCompat.drawTexture(context, tile.textureId, drawX, drawY, 0, 0,
-                    TILE_SIZE, TILE_SIZE, TILE_SIZE, TILE_SIZE);
-            drewAny = true;
+        } finally {
+            context.disableScissor();
         }
-        context.disableScissor();
 
         // Once the viewport is ready, fetch one surrounding ring. Small movements
         // then reveal already-cached tiles instead of showing another loading pause.
