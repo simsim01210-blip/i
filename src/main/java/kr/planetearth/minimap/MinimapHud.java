@@ -11,6 +11,7 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.biome.Biome;
+import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
@@ -34,6 +35,15 @@ public final class MinimapHud {
     private static final Quaternionf CAMERA_ROTATION_SCRATCH = new Quaternionf();
     private static final Vector3f CAMERA_SPACE_SCRATCH = new Vector3f();
     private static final double[] PROJECTED_POINT_SCRATCH = new double[2];
+    private static final int[] EDGE_POINT_SCRATCH = new int[2];
+    // 1/tan(fov/2) of the projection the world was actually drawn with this frame,
+    // captured from WorldRenderEvents. Reading it back means the waypoint labels use
+    // exactly the FOV every zoom/FOV mod already settled on, without calling
+    // GameRenderer#getFov a second time per frame — which re-ran those mods' own FOV
+    // hooks (some keep smoothing state in there) with a made-up tickDelta.
+    private static float worldProjectionScaleY = Float.NaN;
+    private static long worldProjectionNanos;
+    private static final long WORLD_PROJECTION_MAX_AGE_NANOS = 250_000_000L;
     private static final String ARROW_GLYPH = "▲";
     private static final Text ARROW_TEXT = Text.literal(ARROW_GLYPH);
     // The four fixed compass points ringing the map edge — separate from
@@ -71,6 +81,14 @@ public final class MinimapHud {
 
     private MinimapHud() {}
 
+    static void captureWorldProjection(Matrix4f projection) {
+        if (projection == null) return;
+        float scaleY = Math.abs(projection.m11());
+        if (!Float.isFinite(scaleY) || scaleY <= 0f) return;
+        worldProjectionScaleY = scaleY;
+        worldProjectionNanos = System.nanoTime();
+    }
+
     public static void render(DrawContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null || client.world == null || client.options.hudHidden) return;
@@ -84,7 +102,7 @@ public final class MinimapHud {
 
         drawHotbarWatermark(context, client);
 
-        boolean overlayHeld = client.currentScreen == null && PlanetEarthMinimapClient.overlayMapKey.isPressed();
+        boolean overlayHeld = OverlayMap.isActive(client);
         // The overlay map draws its own waypoint markers on top of itself (see
         // drawMapWaypoints), so the world-projected HUD labels underneath are redundant
         // and were bleeding through the overlay's background — skip them while it's up.
@@ -141,15 +159,22 @@ public final class MinimapHud {
         Vec3d cameraPos = PlatformCompat.cameraPosition(camera);
         Quaternionf inverseCameraRotation = CAMERA_ROTATION_SCRATCH
                 .set(camera.getRotation()).conjugate();
-        // Zoom mods narrow this well below 1 degree, so only fall back to the menu FOV
-        // for genuinely broken values — treating a real zoomed-in FOV as invalid was why
-        // markers used to drift toward screen centre (and appear stuck there) while zoomed.
-        double currentFov = client.gameRenderer.getFov(camera, 1.0f, true);
-        if (!Double.isFinite(currentFov) || currentFov <= 0.0) {
-            currentFov = client.options.getFov().getValue();
+        double focalLength;
+        if (Float.isFinite(worldProjectionScaleY)
+                && System.nanoTime() - worldProjectionNanos < WORLD_PROJECTION_MAX_AGE_NANOS) {
+            focalLength = screenHeight * 0.5 * worldProjectionScaleY;
+        } else {
+            // Fallback for a renderer that skips Fabric's world render events.
+            // Zoom mods narrow this well below 1 degree, so only fall back to the menu FOV
+            // for genuinely broken values — treating a real zoomed-in FOV as invalid was why
+            // markers used to drift toward screen centre (and appear stuck there) while zoomed.
+            double currentFov = client.gameRenderer.getFov(camera, 1.0f, true);
+            if (!Double.isFinite(currentFov) || currentFov <= 0.0) {
+                currentFov = client.options.getFov().getValue();
+            }
+            double verticalFov = Math.toRadians(MathHelper.clamp(currentFov, 0.01, 179.0));
+            focalLength = screenHeight / (2.0 * Math.tan(verticalFov * 0.5));
         }
-        double verticalFov = Math.toRadians(MathHelper.clamp(currentFov, 0.01, 179.0));
-        double focalLength = screenHeight / (2.0 * Math.tan(verticalFov * 0.5));
 
         boolean anchoredExistingWaypoint = false;
         for (MinimapConfig.Waypoint waypoint : config.waypoints) {
@@ -468,7 +493,7 @@ public final class MinimapHud {
             String direction = DIRECTIONS[directionIndex];
             int halfWidth = width / 2;
             int halfHeight = height / 2;
-            int[] point = new int[2];
+            int[] point = EDGE_POINT_SCRATCH;
 
             // The four fixed compass points, always projected onto the map's actual
             // edge — the circle's rim when circularShape is on, otherwise the real

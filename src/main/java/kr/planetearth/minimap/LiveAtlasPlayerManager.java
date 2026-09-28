@@ -5,6 +5,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.network.ClientPlayNetworkHandler;
+import net.minecraft.client.network.PlayerListEntry;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.texture.NativeImageBackedTexture;
 import net.minecraft.util.Identifier;
@@ -37,29 +39,52 @@ public final class LiveAtlasPlayerManager {
     private static volatile int rosterSignature;
     private static volatile long rosterRevision;
     private static volatile long nextRefresh;
+    private static volatile boolean rosterLoaded;
+    private static final double[] ROTATED_SCRATCH = new double[2];
+    private static final java.util.regex.Pattern ACCOUNT_NAME =
+            java.util.regex.Pattern.compile("[.*]?[A-Za-z0-9_]{2,16}");
+    private static List<String> tabNames = List.of();
+    private static int tabSignature;
+    private static long tabRevision;
+    private static long nextTabRefresh;
+    private static int onlineCount;
 
     private LiveAtlasPlayerManager() {}
 
-    /** Returns a lightweight, immutable roster for the full-map player browser. */
-    public static List<PlayerEntry> playerEntries() {
+    /** Everyone connected to the server for the full-map player browser: players the
+     *  web map currently shows first (clickable, {@code visible}), then everyone else
+     *  from the in-game tab list — hidden on the map, in another world, vanished from
+     *  Dynmap... — as name-only entries with no usable coordinates. */
+    public static List<PlayerEntry> onlineEntries() {
         refreshIfNeeded();
+        refreshTabListIfNeeded();
         List<WebPlayer> snapshot = players;
-        List<PlayerEntry> entries = new ArrayList<>(snapshot.size());
+        List<String> tab = tabNames;
+        List<PlayerEntry> entries = new ArrayList<>(snapshot.size() + tab.size());
+        Set<String> shown = new java.util.HashSet<>(snapshot.size() * 2);
         for (WebPlayer player : snapshot) {
-            entries.add(new PlayerEntry(player.name, player.account, player.x, player.z));
+            entries.add(new PlayerEntry(player.name, player.account, player.x, player.z, true));
+            shown.add(player.account.toLowerCase(Locale.ROOT));
+        }
+        for (String name : tab) {
+            if (shown.contains(name.toLowerCase(Locale.ROOT))) continue;
+            entries.add(new PlayerEntry(name, name, 0, 0, false));
         }
         return List.copyOf(entries);
     }
 
-    public static int playerCount() {
+    public static int onlineCount() {
         refreshIfNeeded();
-        return players.size();
+        refreshTabListIfNeeded();
+        return onlineCount;
     }
 
-    /** Changes only when players join, leave or rename; position updates stay allocation-free for the UI. */
+    /** Changes only when players join, leave, rename or appear/disappear on the web map;
+     *  position updates stay allocation-free for the UI. */
     public static long rosterRevision() {
         refreshIfNeeded();
-        return rosterRevision;
+        refreshTabListIfNeeded();
+        return rosterRevision * 31 + tabRevision;
     }
 
     /** Resolves a search result again at click time so moving players use their latest coordinates. */
@@ -67,10 +92,61 @@ public final class LiveAtlasPlayerManager {
         if (account == null) return null;
         for (WebPlayer player : players) {
             if (player.account.equalsIgnoreCase(account)) {
-                return new PlayerEntry(player.name, player.account, player.x, player.z);
+                return new PlayerEntry(player.name, player.account, player.x, player.z, true);
             }
         }
         return null;
+    }
+
+    /** Whether the web map is currently showing the local player at all. Until the
+     *  first feed for this session has arrived it's unknown, and treated as shown so
+     *  the self marker doesn't flash grey on every join. */
+    public static boolean isLocalPlayerOnMap() {
+        if (!rosterLoaded) return true;
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return true;
+        String account = client.player.getGameProfile().getName();
+        for (WebPlayer player : players) {
+            if (player.account.equalsIgnoreCase(account)) return true;
+        }
+        return false;
+    }
+
+    /** Server tab list, re-read at most twice a second (render thread only). NPC/fake
+     *  rows that tab-layout plugins inject aren't real accounts, so only names that
+     *  look like a Minecraft (or Floodgate-prefixed Bedrock) account are kept. */
+    private static void refreshTabListIfNeeded() {
+        long now = System.currentTimeMillis();
+        if (now < nextTabRefresh) return;
+        nextTabRefresh = now + 500;
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientPlayNetworkHandler handler = client.getNetworkHandler();
+        List<String> names = new ArrayList<>();
+        if (handler != null) {
+            for (PlayerListEntry entry : handler.getPlayerList()) {
+                if (entry == null || entry.getProfile() == null) continue;
+                String name = entry.getProfile().getName();
+                java.util.UUID id = entry.getProfile().getId();
+                if (name == null || !ACCOUNT_NAME.matcher(name).matches()) continue;
+                // Version 2 UUIDs are what Citizens and most fake-player plugins use.
+                if (id != null && id.version() == 2) continue;
+                names.add(name);
+            }
+        }
+        names.sort(String.CASE_INSENSITIVE_ORDER);
+        int signature = 1;
+        for (String name : names) signature = 31 * signature + name.toLowerCase(Locale.ROOT).hashCode();
+        if (signature != tabSignature || names.size() != tabNames.size()) {
+            tabSignature = signature;
+            tabRevision++;
+        }
+        tabNames = List.copyOf(names);
+        // The web feed only ever lists players visible in *this* world; anyone else
+        // online is still in the tab list, so the union is the real online count.
+        Set<String> union = new java.util.HashSet<>();
+        for (String name : names) union.add(name.toLowerCase(Locale.ROOT));
+        for (WebPlayer player : players) union.add(player.account.toLowerCase(Locale.ROOT));
+        onlineCount = union.size();
     }
 
     static Identifier faceTexture(String account) {
@@ -88,13 +164,15 @@ public final class LiveAtlasPlayerManager {
         int centerY = mapY + height / 2;
         double pixelsPerBlock = 4.0 / (1 << Math.max(0, Math.min(zoom, 7)));
         MinecraftClient client = MinecraftClient.getInstance();
-        String localName = client.player == null ? "" : client.player.getName().getString();
+        // Matched on the account, not the web map's display name — with a nickname
+        // plugin the two differ and the local player used to be drawn twice.
+        String localAccount = client.player == null ? "" : client.player.getGameProfile().getName();
 
-        double[] rotated = new double[2];
+        double[] rotated = ROTATED_SCRATCH;
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         try {
             for (WebPlayer player : players) {
-                if (player.name.equalsIgnoreCase(localName)) continue;
+                if (player.account.equalsIgnoreCase(localAccount)) continue;
                 // The dot's position rotates with the map, but drawPlayer draws the face
                 // and nametag with no active rotation (only its own translate/scale), so
                 // both stay upright instead of spinning or flipping as the map turns.
@@ -245,6 +323,7 @@ public final class LiveAtlasPlayerManager {
                 players = List.of();
                 rosterRevision++;
             }
+            rosterLoaded = true;
             PENDING.set(false);
             return;
         }
@@ -285,6 +364,7 @@ public final class LiveAtlasPlayerManager {
                         rosterRevision++;
                     }
                     players = List.copyOf(updated);
+                    rosterLoaded = true;
                     if (root.has("updates") && root.get("updates").isJsonArray()) {
                         for (JsonElement element : root.getAsJsonArray("updates")) {
                             if (!element.isJsonObject()) continue;
@@ -305,7 +385,9 @@ public final class LiveAtlasPlayerManager {
                 .whenComplete((unused, error) -> PENDING.set(false));
     }
 
-    public record PlayerEntry(String name, String account, double x, double z) {}
+    /** {@code visible} is false for players who are online but not on the web map;
+     *  their x/z are meaningless then. */
+    public record PlayerEntry(String name, String account, double x, double z, boolean visible) {}
 
     private record WebPlayer(String name, String account, double x, double z) {}
 }

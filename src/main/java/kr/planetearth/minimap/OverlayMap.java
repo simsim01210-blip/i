@@ -11,6 +11,17 @@ import net.minecraft.util.math.MathHelper;
 final class OverlayMap {
     private OverlayMap() {}
 
+    /** The one definition of "the overlay is actually on screen", shared by the HUD
+     *  and the scroll hook — so the wheel is only ever taken away from vanilla and
+     *  other mods (zoom mods' scroll-to-zoom, hotbar scrolling...) while the map it
+     *  zooms is really visible, never e.g. with F1 on or no world loaded. */
+    static boolean isActive(MinecraftClient client) {
+        return client.currentScreen == null && client.player != null && client.world != null
+                && !client.options.hudHidden
+                && PlanetEarthMinimapClient.overlayMapKey != null
+                && PlanetEarthMinimapClient.overlayMapKey.isPressed();
+    }
+
     static void render(DrawContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         MinimapConfig config = PlanetEarthMinimapClient.config;

@@ -5,6 +5,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.option.KeyBinding;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.glfw.GLFWScrollCallback;
@@ -62,6 +63,15 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
                 LOGGER.error("미니맵 렌더링 중 오류가 발생해 이번 프레임을 건너뜁니다", error);
             }
         });
+        // Read-only: just remembers the projection the world was drawn with, so HUD
+        // waypoint labels line up with whatever FOV zoom mods set (see MinimapHud).
+        WorldRenderEvents.LAST.register(worldContext -> {
+            try {
+                MinimapHud.captureWorldProjection(worldContext.projectionMatrix());
+            } catch (Throwable error) {
+                LOGGER.debug("월드 투영 행렬을 읽지 못했습니다", error);
+            }
+        });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             try {
                 NavigationManager.tick(client);
@@ -106,9 +116,10 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
                         try {
                             // Only ever swallow the wheel for the overlay map itself: with
                             // any screen open (another mod's GUI, a zoom mod's config,
-                            // chat...) the event must reach that screen / mod untouched,
-                            // even if the overlay key happens to still read as held.
-                            if (client.currentScreen == null && overlayMapKey.isPressed()) {
+                            // chat...), F1, or no world, the event must reach that
+                            // screen / mod untouched, even if the overlay key happens to
+                            // still read as held.
+                            if (OverlayMap.isActive(client)) {
                                 OverlayMap.handleScroll(yoffset);
                                 return;
                             }

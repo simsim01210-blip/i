@@ -3,6 +3,7 @@ package kr.planetearth.minimap;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.tooltip.Tooltip;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.SliderWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
@@ -38,6 +39,10 @@ abstract class FullMapScreenBase extends Screen {
     private double centerWorldX;
     private double centerWorldZ;
     private int zoom = 4;
+    private Text cachedCenterText;
+    private long cachedCenterX;
+    private long cachedCenterZ;
+    private int cachedCenterZoom;
     private boolean initializedCenter;
     private boolean panning;
     private ButtonWidget siteMarkerButton;
@@ -408,7 +413,7 @@ abstract class FullMapScreenBase extends Screen {
         if (!playerBrowserOpen) return;
 
         List<LiveAtlasPlayerManager.PlayerEntry> allPlayers =
-                LiveAtlasPlayerManager.playerEntries();
+                LiveAtlasPlayerManager.onlineEntries();
         List<LiveAtlasPlayerManager.PlayerEntry> players = filteredPlayerEntries(allPlayers);
         openedPlayerRosterRevision = LiveAtlasPlayerManager.rosterRevision();
         String countText = markerSearch.isBlank()
@@ -429,13 +434,20 @@ abstract class FullMapScreenBase extends Screen {
                     Text.literal(player.name()), pressed -> {
                 LiveAtlasPlayerManager.PlayerEntry latest =
                         LiveAtlasPlayerManager.findPlayer(player.account());
-                if (latest == null) latest = player;
+                // Dropped off the map since the list was built — nowhere valid to go.
+                if (latest == null) return;
                 centerWorldX = latest.x();
                 centerWorldZ = latest.z();
                 selectedArea = null;
                 waypointMenuOpen = false;
                 navigationPanelOpen = false;
             }).dimensions(panelX, listY + (i - markerScroll) * 22, controlWidth, 20).build());
+            // Online but not on the web map (hidden, another world...): the name is
+            // still listed, greyed out, but there's no position to jump to.
+            if (!player.visible()) {
+                button.active = false;
+                button.setTooltip(Tooltip.of(Text.literal("지도에 표시되지 않는 플레이어")));
+            }
             markerResultButtons.add(button);
         }
     }
@@ -514,7 +526,7 @@ abstract class FullMapScreenBase extends Screen {
 
     private Text playerSearchText() {
         return Text.literal("온라인 플레이어 검색 (" +
-                LiveAtlasPlayerManager.playerCount() + ")");
+                LiveAtlasPlayerManager.onlineCount() + ")");
     }
 
     private Text waypointText() {
@@ -628,9 +640,7 @@ abstract class FullMapScreenBase extends Screen {
             context.drawTextWithShadow(textRenderer, Text.literal("마커 목록 · 휠로 스크롤"),
                     mapWidth + 10, 19, 0xFFBFBFBF);
         }
-        context.drawTextWithShadow(textRenderer,
-                Text.literal(String.format("중심 %.0f, %.0f  |  배율 %d", centerWorldX, centerWorldZ, zoom)),
-                8, 8, 0xFFFFFFFF);
+        context.drawTextWithShadow(textRenderer, centerText(), 8, 8, 0xFFFFFFFF);
         drawNavigationStatus(context, mapWidth);
         context.drawTextWithShadow(textRenderer,
                 Text.literal("좌클릭: 영역 정보 / 드래그 이동  |  휠: 확대·축소  |  우클릭: 지정 메뉴"),
@@ -645,12 +655,27 @@ abstract class FullMapScreenBase extends Screen {
         drawNavigationPanel(context, mapWidth);
     }
 
+    /** Rebuilt only when the rounded numbers actually change instead of running
+     *  String.format (which re-parses its pattern) on every rendered frame. */
+    private Text centerText() {
+        long roundedX = Math.round(centerWorldX);
+        long roundedZ = Math.round(centerWorldZ);
+        if (cachedCenterText == null || roundedX != cachedCenterX
+                || roundedZ != cachedCenterZ || zoom != cachedCenterZoom) {
+            cachedCenterX = roundedX;
+            cachedCenterZ = roundedZ;
+            cachedCenterZoom = zoom;
+            cachedCenterText = Text.literal("중심 " + roundedX + ", " + roundedZ + "  |  배율 " + zoom);
+        }
+        return cachedCenterText;
+    }
+
     private void refreshSidebarLabels() {
         MinimapConfig config = PlanetEarthMinimapClient.config;
         int state = config.showSiteMarkers ? 1 : 0;
         state = state * 31 + (config.showWaypoints ? 1 : 0);
         state = state * 31 + (config.showPlayers ? 1 : 0);
-        state = state * 31 + LiveAtlasPlayerManager.playerCount();
+        state = state * 31 + LiveAtlasPlayerManager.onlineCount();
         for (String category : LiveAtlasMarkerManager.CATEGORIES.keySet()) {
             state = state * 31 + LiveAtlasMarkerManager.count(category);
         }
@@ -705,13 +730,18 @@ abstract class FullMapScreenBase extends Screen {
         int headSize = config.showPlayerFaces
                 ? MathHelper.clamp(config.playerFaceSize + 3, 9, 20) : 0;
         if (x < 4 || x >= mapWidth - 4 || y < 4 || y >= height - 4) return;
+        // Yellow means "this is you, and others see you here too"; when the web map
+        // isn't showing us to anyone (hidden, vanished...) the highlight goes grey.
+        boolean onMap = LiveAtlasPlayerManager.isLocalPlayerOnMap();
+        int frameColor = onMap ? 0xFFFFD84D : 0xFF9A9A9A;
+        int labelColor = onMap ? 0xFFFFE45C : 0xFFB4B4B4;
 
         PlatformCompat.push(context);
         if (config.showPlayerFaces) {
             int headX = x - headSize / 2;
             int headY = y - headSize / 2;
             context.fill(headX - 3, headY - 3,
-                    headX + headSize + 3, headY + headSize + 3, 0xFFFFD84D);
+                    headX + headSize + 3, headY + headSize + 3, frameColor);
             context.fill(headX - 1, headY - 1,
                     headX + headSize + 1, headY + headSize + 1, 0xFF111111);
             Identifier skin = LiveAtlasPlayerManager.faceTexture(
@@ -747,7 +777,7 @@ abstract class FullMapScreenBase extends Screen {
             PlatformCompat.scale(context, labelScale, labelScale);
             context.fill(-3, -2, rawWidth + 3,
                     client.textRenderer.fontHeight + 2, 0xE0101010);
-            context.drawTextWithShadow(client.textRenderer, label, 0, 0, 0xFFFFE45C);
+            context.drawTextWithShadow(client.textRenderer, label, 0, 0, labelColor);
             PlatformCompat.pop(context);
         }
         PlatformCompat.pop(context);
@@ -1173,7 +1203,7 @@ abstract class FullMapScreenBase extends Screen {
         int mapWidth = mapWidth();
         if (mouseX >= mapWidth && playerBrowserOpen) {
             List<LiveAtlasPlayerManager.PlayerEntry> players = filteredPlayerEntries(
-                    LiveAtlasPlayerManager.playerEntries());
+                    LiveAtlasPlayerManager.onlineEntries());
             int visibleRows = Math.max(1, (height - 90) / 22);
             int maxScroll = Math.max(0, players.size() - visibleRows);
             int previous = markerScroll;
