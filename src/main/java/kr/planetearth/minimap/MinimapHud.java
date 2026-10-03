@@ -903,9 +903,10 @@ public final class MinimapHud {
      *  half is cheap to format and is recomputed every call so the seconds stay live. */
     private static String biomeAndClockText(MinecraftClient client) {
         refreshBiomeCache(client);
-        long second = System.currentTimeMillis() / 1_000L;
+        long nowMillis = NetworkClock.currentTimeMillis();
+        long second = nowMillis / 1_000L;
         if (second == cachedStatusSecond && !cachedStatusText.isEmpty()) return cachedStatusText;
-        String clock = currentClockText();
+        String clock = currentClockText(nowMillis);
         cachedStatusText = cachedBiomeName.isEmpty() ? clock : cachedBiomeName + " · " + clock;
         cachedStatusTextComponent = Text.literal(cachedStatusText);
         cachedStatusSecond = second;
@@ -935,8 +936,8 @@ public final class MinimapHud {
     /** Real Korea-time (Asia/Seoul) clock as a 12-hour readout with seconds, e.g.
      *  "오후 3시 30분 45초" — independent of the player's system timezone and of the
      *  in-game day/night cycle. */
-    private static String currentClockText() {
-        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(KOREA_ZONE);
+    private static String currentClockText(long nowMillis) {
+        java.time.ZonedDateTime now = java.time.Instant.ofEpochMilli(nowMillis).atZone(KOREA_ZONE);
         int hour24 = now.getHour();
         int minute = now.getMinute();
         int second = now.getSecond();
