@@ -129,6 +129,9 @@ public final class MinimapHud {
         if (overlayHeld) return;
 
         if (!config.enabled) return;
+        // Holding Tab tucks the minimap away while the player list is up, so the two
+        // don't pile on top of each other (both like the top of the screen).
+        if (client.currentScreen == null && client.options.playerListKey.isPressed()) return;
         drawMap(context, config.x, config.y, config.width, config.height, false);
     }
 
@@ -459,7 +462,11 @@ public final class MinimapHud {
         // (world, worldpvp, ...) fetches from its own tile namespace, drewMap already
         // reflects reality correctly — World PvP's void-biome terrain has its own real
         // map and should just show it, not the loading indicator.
-        boolean showLoading = loading.shouldShow(!drewMap);
+        // With the web map down nothing missing is going to arrive, so the loading
+        // indicator would just sit on top of the terrain that *is* already cached —
+        // keep showing that instead and say why it isn't updating.
+        boolean webMapDown = WebMapHealth.isDown();
+        boolean showLoading = loading.shouldShow(!webMapDown && !drewMap);
 
         if (client.player != null && config.showWaypoints) {
             drawMapWaypoints(context, clampedX, clampedY, width, height,
@@ -555,6 +562,10 @@ public final class MinimapHud {
                 context.drawTextWithShadow(client.textRenderer, coords, clampedX + 4,
                         clampedY + height - client.textRenderer.fontHeight - 3, 0xFFFFFFFF);
             }
+        }
+
+        if (webMapDown) {
+            drawWebMapDownNotice(context, clampedX, clampedY, width, height);
         }
 
         // Trims the square map down to a circle by painting the same solid colour
@@ -717,6 +728,42 @@ public final class MinimapHud {
                 visible = false;
             }
             return visible;
+        }
+    }
+
+    private static final Text WEB_MAP_DOWN_TEXT = Text.literal("웹지도 연결이 원활하지 않습니다");
+    private static List<net.minecraft.text.OrderedText> webMapDownLines = List.of();
+    private static int webMapDownLinesWidth = -1;
+
+    /** Shown over the (still drawn, last cached) map while {@link WebMapHealth} judges
+     *  the web map down. Wrapped to the map's width so it also fits the small minimap;
+     *  the wrap is cached per width instead of redone every frame. Shared with the
+     *  full map screen. */
+    static void drawWebMapDownNotice(DrawContext context, int mapX, int mapY, int width, int height) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        int maxTextWidth = Math.max(40, width - 16);
+        if (maxTextWidth != webMapDownLinesWidth) {
+            webMapDownLines = client.textRenderer.wrapLines(WEB_MAP_DOWN_TEXT, maxTextWidth);
+            webMapDownLinesWidth = maxTextWidth;
+        }
+        int fontHeight = client.textRenderer.fontHeight;
+        int lineHeight = fontHeight + 1;
+        int blockHeight = webMapDownLines.size() * lineHeight - 1;
+        int blockWidth = 0;
+        for (net.minecraft.text.OrderedText line : webMapDownLines) {
+            blockWidth = Math.max(blockWidth, client.textRenderer.getWidth(line));
+        }
+        int centerX = mapX + width / 2;
+        // Upper part of the map: clear of the self arrow at the centre and of the
+        // coordinates along the bottom edge, and still inside a circular frame.
+        int top = mapY + Math.max(14, height / 4 - blockHeight / 2);
+        context.fill(centerX - blockWidth / 2 - 4, top - 3,
+                centerX + (blockWidth + 1) / 2 + 4, top + blockHeight + 3, 0xD0301010);
+        for (int i = 0; i < webMapDownLines.size(); i++) {
+            net.minecraft.text.OrderedText line = webMapDownLines.get(i);
+            context.drawTextWithShadow(client.textRenderer, line,
+                    centerX - client.textRenderer.getWidth(line) / 2,
+                    top + i * lineHeight, 0xFFFFB0A0);
         }
     }
 

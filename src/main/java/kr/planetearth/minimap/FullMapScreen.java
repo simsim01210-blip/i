@@ -621,6 +621,9 @@ abstract class FullMapScreenBase extends Screen {
                 centerWorldX, centerWorldZ, pixelsPerBlock());
         drawLocalPlayer(context, mapWidth);
         drawPendingWaypoint(context, mapWidth);
+        if (WebMapHealth.isDown()) {
+            MinimapHud.drawWebMapDownNotice(context, 0, 0, mapWidth, height);
+        }
 
         context.fill(mapWidth, 0, width, height, 0xF0181818);
         context.fill(mapWidth, 0, mapWidth + 2, height, 0xFF8B8B8B);

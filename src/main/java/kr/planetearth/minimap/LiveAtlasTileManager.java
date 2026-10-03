@@ -125,6 +125,8 @@ public final class LiveAtlasTileManager {
     private static final Map<TileKey, Tile> TILES = new ConcurrentHashMap<>();
     private static final Map<TileKey, CompletableFuture<?>> PENDING = new ConcurrentHashMap<>();
     private static final Map<TileKey, Long> RETRY_AFTER = new ConcurrentHashMap<>();
+    private static final java.util.Set<TileKey> FAILED = ConcurrentHashMap.newKeySet();
+    private static final long FAILED_RETRY_NANOS = Duration.ofSeconds(3).toNanos();
     private static final Map<TileKey, Long> UPDATE_VERSIONS = new ConcurrentHashMap<>();
     private static final Map<TileKey, PendingUpload> READY_UPLOADS = new ConcurrentHashMap<>();
     private static final Map<String, TileKey> ACTIVE_BY_PATH = new ConcurrentHashMap<>();
@@ -345,6 +347,9 @@ public final class LiveAtlasTileManager {
         // was pending. A large full-map viewport could therefore build thousands of
         // duplicate callbacks before a slow tile finished.
         if (PENDING.containsKey(key)) return;
+        // Web map not answering: don't queue up a full viewport of requests against
+        // it, just an occasional probe so recovery is noticed (see WebMapHealth).
+        if (WebMapHealth.isDown() && !WebMapHealth.allowProbe()) return;
         int pendingLimit = maxPendingRequests()
                 + (highPriority ? PRIORITY_EXTRA_PENDING : 0);
         if (PENDING.size() >= pendingLimit) return;
@@ -374,8 +379,18 @@ public final class LiveAtlasTileManager {
             (highPriority ? PRIORITY_HTTP : HTTP)
                     .sendAsync(httpRequest, HttpResponse.BodyHandlers.ofByteArray())
                     .thenApplyAsync(response -> {
-                        if (response.statusCode() != 200
-                                || response.body().length <= EMPTY_TILE_MAX_BYTES) {
+                        int status = response.statusCode();
+                        if (status != 200 && status != 404) {
+                            // 5xx / 429 / Cloudflare challenge...: the server is having
+                            // trouble, which says nothing about whether this tile exists.
+                            // Counting it as an empty tile used to push perfectly good
+                            // tiles into the multi-minute empty-tile backoff, so the map
+                            // stayed blank long after the web map itself came back.
+                            markFailed(key);
+                            return null;
+                        }
+                        if (status == 404 || response.body().length <= EMPTY_TILE_MAX_BYTES) {
+                            WebMapHealth.recordSuccess();
                             // LiveAtlas answers with HTTP 200 and a ~116-byte solid-blue
                             // WebP for tiles that have not been rendered. Treat it as
                             // missing instead of a successfully loaded map tile.
@@ -386,7 +401,12 @@ public final class LiveAtlasTileManager {
                             RETRY_AFTER.put(key, System.nanoTime() + delay);
                             return null;
                         }
-                        return decode(response.body());
+                        NativeImage decoded = decode(response.body());
+                        // A 200 that isn't an image is an error page served by a proxy
+                        // in front of the map, not a real tile.
+                        if (decoded == null) markFailed(key);
+                        else WebMapHealth.recordSuccess();
+                        return decoded;
                     }, highPriority ? PRIORITY_TILE_EXECUTOR : TILE_EXECUTOR)
                     .thenAccept(image -> {
                         if (image == null) {
@@ -398,12 +418,26 @@ public final class LiveAtlasTileManager {
                     })
                     .exceptionally(error -> {
                         PlanetEarthMinimapClient.LOGGER.debug("Tile download failed for {}", key, error);
+                        markFailed(key);
                         lifecycle.completeExceptionally(error);
                         return null;
                     });
         } catch (Throwable error) {
             lifecycle.completeExceptionally(error);
         }
+    }
+
+    /** A download that failed because of the server/network rather than the tile:
+     *  short retry, and remembered so it can be retried at once on recovery. */
+    private static void markFailed(TileKey key) {
+        WebMapHealth.recordFailure();
+        RETRY_AFTER.put(key, System.nanoTime() + FAILED_RETRY_NANOS);
+        FAILED.add(key);
+    }
+
+    static void onWebMapRecovered() {
+        for (TileKey key : FAILED) RETRY_AFTER.remove(key);
+        FAILED.clear();
     }
 
     private static void uploadReadyTiles(List<TileKey> visibleKeys, int budget, long maxNanos) {
@@ -604,6 +638,7 @@ public final class LiveAtlasTileManager {
         MinecraftClient client = MinecraftClient.getInstance();
         RETRY_AFTER.remove(key);
         EMPTY_STREAK.remove(key);
+        FAILED.remove(key);
 
         // Dynamic tile paths are deterministic. Registering a refreshed image therefore
         // replaces the texture under the same Identifier. Destroy the old registration

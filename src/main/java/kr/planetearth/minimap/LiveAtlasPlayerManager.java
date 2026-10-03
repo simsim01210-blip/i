@@ -58,7 +58,7 @@ public final class LiveAtlasPlayerManager {
     public static List<PlayerEntry> onlineEntries() {
         refreshIfNeeded();
         refreshTabListIfNeeded();
-        List<WebPlayer> snapshot = players;
+        List<WebPlayer> snapshot = shownPlayers();
         List<String> tab = tabNames;
         List<PlayerEntry> entries = new ArrayList<>(snapshot.size() + tab.size());
         Set<String> shown = new java.util.HashSet<>(snapshot.size() * 2);
@@ -84,13 +84,13 @@ public final class LiveAtlasPlayerManager {
     public static long rosterRevision() {
         refreshIfNeeded();
         refreshTabListIfNeeded();
-        return rosterRevision * 31 + tabRevision;
+        return (rosterRevision * 31 + tabRevision) * 2 + (WebMapHealth.isDown() ? 1 : 0);
     }
 
     /** Resolves a search result again at click time so moving players use their latest coordinates. */
     public static PlayerEntry findPlayer(String account) {
         if (account == null) return null;
-        for (WebPlayer player : players) {
+        for (WebPlayer player : shownPlayers()) {
             if (player.account.equalsIgnoreCase(account)) {
                 return new PlayerEntry(player.name, player.account, player.x, player.z, true);
             }
@@ -106,10 +106,16 @@ public final class LiveAtlasPlayerManager {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) return true;
         String account = client.player.getGameProfile().getName();
-        for (WebPlayer player : players) {
+        for (WebPlayer player : shownPlayers()) {
             if (player.account.equalsIgnoreCase(account)) return true;
         }
         return false;
+    }
+
+    /** The web roster as it may be shown: nothing while the web map is down, since the
+     *  last positions it gave are frozen and would show everyone standing still. */
+    private static List<WebPlayer> shownPlayers() {
+        return WebMapHealth.isDown() ? List.of() : players;
     }
 
     /** Server tab list, re-read at most twice a second (render thread only). NPC/fake
@@ -145,7 +151,7 @@ public final class LiveAtlasPlayerManager {
         // online is still in the tab list, so the union is the real online count.
         Set<String> union = new java.util.HashSet<>();
         for (String name : names) union.add(name.toLowerCase(Locale.ROOT));
-        for (WebPlayer player : players) union.add(player.account.toLowerCase(Locale.ROOT));
+        for (WebPlayer player : shownPlayers()) union.add(player.account.toLowerCase(Locale.ROOT));
         onlineCount = union.size();
     }
 
@@ -171,7 +177,7 @@ public final class LiveAtlasPlayerManager {
         double[] rotated = ROTATED_SCRATCH;
         context.enableScissor(mapX, mapY, mapX + width, mapY + height);
         try {
-            for (WebPlayer player : players) {
+            for (WebPlayer player : shownPlayers()) {
                 if (player.account.equalsIgnoreCase(localAccount)) continue;
                 // The dot's position rotates with the map, but drawPlayer draws the face
                 // and nametag with no active rotation (only its own translate/scale), so
@@ -307,7 +313,10 @@ public final class LiveAtlasPlayerManager {
         // player roster — 저사양 모드 stretches the interval instead of cutting this
         // feed outright, since unlike faces/territory colour there's no per-item
         // toggle to fall back to; player dots just update a little less often.
-        nextRefresh = now + (PlanetEarthMinimapClient.config != null
+        // While the web map is down this poll doubles as the recovery probe, so it
+        // keeps going, just less often than a healthy server is polled.
+        nextRefresh = now + (WebMapHealth.isDown() ? 2000
+                : PlanetEarthMinimapClient.config != null
                 && PlanetEarthMinimapClient.config.lowSpecMode ? 1500 : 500);
         // Follows whichever Dynmap world the player is actually standing in (world,
         // worldpvp, ...) instead of always polling "world" — otherwise the corner
@@ -330,14 +339,18 @@ public final class LiveAtlasPlayerManager {
         String base = PlanetEarthMinimapClient.config.mapBaseUrl();
         String url = base + "/up/world/" + world + "/" + now;
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(12))
+                .timeout(Duration.ofSeconds(8))
                 .header("User-Agent", "PlanetEarthMinimap/0.1")
                 .header("Referer", base + "/")
                 .GET()
                 .build();
+        WebMapHealth.feedRequestStarted();
         HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenAccept(response -> {
-                    if (response.statusCode() != 200) return;
+                    if (response.statusCode() != 200) {
+                        WebMapHealth.recordFailure();
+                        return;
+                    }
                     JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
                     List<WebPlayer> updated = new ArrayList<>();
                     for (JsonElement element : root.getAsJsonArray("players")) {
@@ -365,6 +378,7 @@ public final class LiveAtlasPlayerManager {
                     }
                     players = List.copyOf(updated);
                     rosterLoaded = true;
+                    WebMapHealth.recordSuccess();
                     if (root.has("updates") && root.get("updates").isJsonArray()) {
                         for (JsonElement element : root.getAsJsonArray("updates")) {
                             if (!element.isJsonObject()) continue;
@@ -380,9 +394,13 @@ public final class LiveAtlasPlayerManager {
                 })
                 .exceptionally(error -> {
                     PlanetEarthMinimapClient.LOGGER.debug("LiveAtlas player update failed", error);
+                    WebMapHealth.recordFailure();
                     return null;
                 })
-                .whenComplete((unused, error) -> PENDING.set(false));
+                .whenComplete((unused, error) -> {
+                    WebMapHealth.feedRequestFinished();
+                    PENDING.set(false);
+                });
     }
 
     /** {@code visible} is false for players who are online but not on the web map;
