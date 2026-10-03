@@ -210,7 +210,7 @@ public final class LiveAtlasPlayerManager {
         if (config.showPlayerNames) {
             String label = player.name;
             float labelScale = config.playerNameScalePercent / 100.0f;
-            int rawLabelWidth = client.textRenderer.getWidth(label);
+            int rawLabelWidth = TextWidthCache.width(label);
             int labelWidth = (int) Math.ceil(rawLabelWidth * labelScale);
             int labelHeight = (int) Math.ceil(client.textRenderer.fontHeight * labelScale);
             int labelX = x + headSize / 2 + 3;

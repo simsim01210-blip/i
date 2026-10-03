@@ -102,6 +102,7 @@ public final class LiveAtlasMarkerManager {
     // Reused by the polygon scanline rasterizer. The old List<Double> path boxed every
     // intersection and allocated another double[] for every span on every screen row.
     private static double[] scanlineScratch = new double[64];
+    private static final double[] ROTATED_SCRATCH = new double[2];
 
     private LiveAtlasMarkerManager() {}
 
@@ -364,7 +365,7 @@ public final class LiveAtlasMarkerManager {
 
         int centerX = mapX + width / 2;
         int centerY = mapY + height / 2;
-        double[] rotated = new double[2];
+        double[] rotated = ROTATED_SCRATCH;
         for (MarkerDrawEntry entry : batch.entries) {
             // Same treatment as the area labels above: the icon's position rotates
             // with the map, but it and its label are drawn with no active rotation so
@@ -854,8 +855,9 @@ public final class LiveAtlasMarkerManager {
         // "§l" is the legacy bold formatting code — it doesn't change getWidth(), only
         // how each glyph is stroked, and gives dense Korean characters more starting
         // stroke mass to survive the matrix-scale blur below without vanishing.
-        String rendered = PlanetEarthMinimapClient.config.boldMapLabels ? "§l" + text : text;
-        int rawWidth = client.textRenderer.getWidth(text);
+        String rendered = PlanetEarthMinimapClient.config.boldMapLabels
+                ? BOLD_LABELS.computeIfAbsent(text, plain -> "§l" + plain) : text;
+        int rawWidth = TextWidthCache.width(text);
         int scaledWidth = Math.round(rawWidth * scale);
         int scaledHeight = Math.round(client.textRenderer.fontHeight * scale);
         int x = centerX - scaledWidth / 2;
@@ -877,11 +879,24 @@ public final class LiveAtlasMarkerManager {
     /** World PvP's own markers are labelled with a bare number ("4"), which only reads
      *  as "4번 포탈" — everywhere else a marker's label is shown as-is. */
     private static String displayLabel(String rawLabel, boolean inWorldPvp) {
-        if (inWorldPvp && rawLabel != null && !rawLabel.isEmpty()
-                && rawLabel.chars().allMatch(Character::isDigit)) {
-            return rawLabel + "번 포탈";
-        }
-        return rawLabel;
+        if (!inWorldPvp || rawLabel == null || rawLabel.isEmpty()) return rawLabel;
+        // Runs per marker per frame — memoised instead of re-streaming the digits
+        // and concatenating a new string every time.
+        return PORTAL_LABELS.computeIfAbsent(rawLabel, label ->
+                label.chars().allMatch(Character::isDigit) ? label + "번 포탈" : label);
+    }
+
+    // Render-thread-only memo tables for strings derived from marker data. Their keys
+    // are the labels themselves, so they stay valid across feed reloads; clearLabelMemos
+    // keeps them from accumulating names of towns that no longer exist.
+    private static final Map<String, String> BOLD_LABELS = new java.util.HashMap<>();
+    private static final Map<String, String> PORTAL_LABELS = new java.util.HashMap<>();
+    private static final Map<String, String> LABEL_KEYS = new java.util.HashMap<>();
+
+    private static void clearLabelMemosIfLarge() {
+        if (BOLD_LABELS.size() > 8192) BOLD_LABELS.clear();
+        if (PORTAL_LABELS.size() > 8192) PORTAL_LABELS.clear();
+        if (LABEL_KEYS.size() > 8192) LABEL_KEYS.clear();
     }
 
     /** One persistent name label per marker instead of only on hover — placed just
@@ -907,7 +922,8 @@ public final class LiveAtlasMarkerManager {
         double minVisibleZ = centerWorldZ - halfWorldHeight;
         double maxVisibleZ = centerWorldZ + halfWorldHeight;
         Map<String, MarkerCategory> snapshot = markerData;
-        double[] rotated = new double[2];
+        double[] rotated = ROTATED_SCRATCH;
+        clearLabelMemosIfLarge();
         for (String category : enabledCategories) {
             MarkerCategory data = snapshot.get(category);
             if (data == null) continue;
@@ -921,7 +937,8 @@ public final class LiveAtlasMarkerManager {
                 // name) — the marker's label is pinned precisely on its icon, so
                 // drawing the area's copy too just doubles the same text on top of
                 // itself instead of adding information.
-                if (markerLabelKeys.contains(text.trim().toLowerCase(Locale.ROOT))) continue;
+                if (markerLabelKeys.contains(LABEL_KEYS.computeIfAbsent(text,
+                        name -> name.trim().toLowerCase(Locale.ROOT)))) continue;
                 double worldCenterX = (area.minX + area.maxX) / 2.0;
                 double worldCenterZ = (area.minZ + area.maxZ) / 2.0;
                 // Position rotates with the map (so the label still sits over its own

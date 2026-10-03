@@ -512,7 +512,7 @@ public final class MinimapHud {
                 float bearing = COMPASS_BEARINGS[i] + contentRotation;
                 projectToMapEdge(centerX, centerY, halfWidth, halfHeight,
                         circularShape, bearing, 10, point);
-                int labelWidth = client.textRenderer.getWidth(COMPASS_LABELS[i]);
+                int labelWidth = TextWidthCache.width(COMPASS_LABELS[i]);
                 context.drawTextWithShadow(client.textRenderer, COMPASS_TEXTS[i],
                         point[0] - labelWidth / 2,
                         point[1] - client.textRenderer.fontHeight / 2, 0xFFFFFFFF);
@@ -527,11 +527,11 @@ public final class MinimapHud {
                 projectToMapEdge(centerX, centerY, halfWidth, halfHeight, true,
                         135f + contentRotation, 10, point);
                 context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
-                        point[0] - client.textRenderer.getWidth(direction) / 2,
+                        point[0] - TextWidthCache.width(direction) / 2,
                         point[1] - client.textRenderer.fontHeight / 2, 0xFFFFFF55);
             } else {
                 context.drawTextWithShadow(client.textRenderer, DIRECTION_TEXTS[directionIndex],
-                        clampedX + width - client.textRenderer.getWidth(direction) - 4,
+                        clampedX + width - TextWidthCache.width(direction) - 4,
                         clampedY + 4, 0xFFFFFF55);
             }
 
@@ -980,7 +980,7 @@ public final class MinimapHud {
      *  rather than caching it. */
     public static int statusBarWidth() {
         MinecraftClient client = MinecraftClient.getInstance();
-        int rawWidth = client.textRenderer.getWidth(biomeAndClockText(client)) + 10;
+        int rawWidth = TextWidthCache.width(biomeAndClockText(client)) + 10;
         return Math.round(rawWidth * statusBarScale());
     }
 
@@ -1032,12 +1032,24 @@ public final class MinimapHud {
             out[1] = dy;
             return;
         }
-        double rad = Math.toRadians(rotationDegrees);
-        double cos = Math.cos(rad);
-        double sin = Math.sin(rad);
+        // Called once per marker, territory label, player and waypoint every frame,
+        // always with the same angle within a frame — so the trig is done once per
+        // angle instead of once per item.
+        if (rotationDegrees != rotateCacheDegrees) {
+            double rad = Math.toRadians(rotationDegrees);
+            rotateCacheCos = Math.cos(rad);
+            rotateCacheSin = Math.sin(rad);
+            rotateCacheDegrees = rotationDegrees;
+        }
+        double cos = rotateCacheCos;
+        double sin = rotateCacheSin;
         out[0] = dx * cos - dy * sin;
         out[1] = dx * sin + dy * cos;
     }
+
+    private static float rotateCacheDegrees = Float.NaN;
+    private static double rotateCacheCos = 1.0;
+    private static double rotateCacheSin = 0.0;
 
     /** Where a ray from the map's centre at the given bearing (0 = up/north, clockwise)
      *  meets the map's own edge — a circle's edge when circularShape is on, otherwise
