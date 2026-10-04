@@ -1,0 +1,10 @@
+PlanetMap bundles the following third-party component, unmodified:
+
+MCEF (Minecraft Chromium Embedded Framework)
+  Copyright CinemaMod Group
+  License: GNU Lesser General Public License v2.1 (see MCEF-LGPL-2.1.txt)
+  Source:  https://github.com/CinemaMod/mcef
+  Located in this jar at META-INF/jars/ as a separate, replaceable mod jar.
+
+MCEF downloads the Chromium Embedded Framework binaries it needs on first launch
+from https://mcef-download.cinemamod.com.
