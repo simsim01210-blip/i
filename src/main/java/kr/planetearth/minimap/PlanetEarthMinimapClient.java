@@ -3,6 +3,7 @@ package kr.planetearth.minimap;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
@@ -75,10 +76,12 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
                 LOGGER.debug("월드 투영 행렬을 읽지 못했습니다", error);
             }
         });
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> WebMapBrowser.onJoin());
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             try {
                 // Also from the tick: with F1 on the HUD callback above never runs.
                 WebMapBrowser.pump();
+                WebMapBrowser.tickJoinNotice(client);
                 NavigationManager.tick(client);
                 while (editKey.wasPressed()) {
                     MinimapEditorScreen.playOpenCloseSound();

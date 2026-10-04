@@ -745,7 +745,7 @@ public final class MinimapHud {
     }
 
     private static Text webMapNoticeText() {
-        if (WebMapBrowser.verificationNeeded()) {
+        if (WebMapBrowser.verificationNeeded() || WebMapBrowser.canVerify()) {
             // Names the key the player actually bound; rebuilt only when it changes so
             // the wrapped-lines cache (keyed on this Text instance) keeps hitting.
             String key = WebMapBrowser.fullMapKeyName();

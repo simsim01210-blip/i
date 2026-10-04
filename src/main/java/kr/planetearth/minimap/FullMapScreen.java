@@ -130,7 +130,7 @@ abstract class FullMapScreenBase extends Screen {
         verifyButton = addDrawableChild(ButtonWidget.builder(Text.literal("웹지도 인증"),
                 pressed -> WebMapBrowser.openVerifyScreen())
                 .dimensions(mapWidth() / 2 - 60, height / 4 + 14, 120, 20).build());
-        verifyButton.visible = WebMapBrowser.verificationNeeded();
+        verifyButton.visible = WebMapBrowser.canVerify();
         if (playerBrowserOpen) {
             rebuildPlayerBrowser(panelX, controlWidth);
             return;
@@ -631,7 +631,7 @@ abstract class FullMapScreenBase extends Screen {
         if (MinimapHud.showWebMapNotice()) {
             MinimapHud.drawWebMapDownNotice(context, 0, 0, mapWidth, height);
         }
-        if (verifyButton != null) verifyButton.visible = WebMapBrowser.verificationNeeded();
+        if (verifyButton != null) verifyButton.visible = WebMapBrowser.canVerify();
 
         context.fill(mapWidth, 0, width, height, 0xF0181818);
         context.fill(mapWidth, 0, mapWidth + 2, height, 0xFF8B8B8B);

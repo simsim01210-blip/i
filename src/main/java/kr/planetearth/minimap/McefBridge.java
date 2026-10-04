@@ -45,30 +45,38 @@ final class McefBridge {
               function send(o) {
                 window.%s({request: JSON.stringify(o), onSuccess: function () {}, onFailure: function () {}});
               }
-              function next() {
-                while (active < LIMIT && queue.length) {
-                  var job = queue.shift();
-                  active++;
-                  fetch(job.url, {credentials: 'include', cache: 'no-store', headers: job.headers})
-                    .then(function (r) {
-                      return r.blob().then(function (blob) {
-                        return new Promise(function (resolve) {
-                          var reader = new FileReader();
-                          reader.onload = function () {
-                            var s = String(reader.result), i = s.indexOf(',');
-                            resolve(i < 0 ? '' : s.substring(i + 1));
-                          };
-                          reader.onerror = function () { resolve(''); };
-                          reader.readAsDataURL(blob);
-                        });
-                      }).then(function (b64) {
-                        send({id: job.id, s: r.status, b: b64, e: r.headers.get('etag'),
-                              m: r.headers.get('last-modified'), c: r.headers.get('cf-mitigated')});
+              // Each job gets its own function scope: with plain `var` inside the loop
+              // below, every request started in the same pass shared one `job`, so all
+              // of them answered with the last one's id and the rest never completed.
+              function start(job) {
+                active++;
+                // A request that never answers must not hold one of the few slots
+                // forever — that could stall the whole queue silently.
+                var controller = new AbortController();
+                var timer = setTimeout(function () { controller.abort(); }, 20000);
+                fetch(job.url, {credentials: 'include', cache: 'no-store', headers: job.headers,
+                                signal: controller.signal})
+                  .then(function (r) {
+                    return r.blob().then(function (blob) {
+                      return new Promise(function (resolve) {
+                        var reader = new FileReader();
+                        reader.onload = function () {
+                          var s = String(reader.result), i = s.indexOf(',');
+                          resolve(i < 0 ? '' : s.substring(i + 1));
+                        };
+                        reader.onerror = function () { resolve(''); };
+                        reader.readAsDataURL(blob);
                       });
-                    })
-                    .catch(function (err) { send({id: job.id, s: 0, b: '', x: String(err)}); })
-                    .then(function () { active--; next(); });
-                }
+                    }).then(function (b64) {
+                      send({id: job.id, s: r.status, b: b64, e: r.headers.get('etag'),
+                            m: r.headers.get('last-modified'), c: r.headers.get('cf-mitigated')});
+                    });
+                  })
+                  .catch(function (err) { send({id: job.id, s: 0, b: '', x: String(err)}); })
+                  .then(function () { clearTimeout(timer); active--; next(); });
+              }
+              function next() {
+                while (active < LIMIT && queue.length) start(queue.shift());
               }
               window.__planetmap = {
                 run: function (id, url, headers) {
@@ -138,10 +146,29 @@ final class McefBridge {
         return future;
     }
 
+    // Diagnostics: one status line every few seconds while the browser route is in use.
+    private static final java.util.concurrent.atomic.AtomicInteger RESPONSES_OK = new AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger RESPONSES_CHALLENGED = new AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger RESPONSES_FAILED = new AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger DISPATCHED = new AtomicInteger();
+    private static final long STATUS_LOG_MILLIS = 15_000L;
+    private static long nextStatusLogAt;
+
+    private static void logStatusIfDue() {
+        long now = System.currentTimeMillis();
+        if (now < nextStatusLogAt) return;
+        nextStatusLogAt = now + STATUS_LOG_MILLIS;
+        PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 상태: 페이지 준비 {}, 보냄 {}, 정상 {}, 확인페이지 {}, "
+                        + "실패 {}, 대기 {}, 응답 대기 {}",
+                bridgeReady, DISPATCHED.get(), RESPONSES_OK.get(), RESPONSES_CHALLENGED.get(),
+                RESPONSES_FAILED.get(), QUEUE.size(), PENDING.size());
+    }
+
     /** Render thread. CEF calls are made from here only. */
     static void pump() {
         if (!isAvailable()) return;
         try {
+            logStatusIfDue();
             ensureBridge();
             if (!bridgeReady) {
                 if (bridge != null && System.currentTimeMillis() >= bridgeRetryAt) {
@@ -156,6 +183,7 @@ final class McefBridge {
                 Pending pending = PENDING.get(id);
                 if (pending == null) continue;
                 pending.dispatchedAtMillis = System.currentTimeMillis();
+                DISPATCHED.incrementAndGet();
                 bridge.executeJavaScript("window.__planetmap&&window.__planetmap.run(" + id + ","
                         + jsString(pending.url) + "," + jsString(pending.headersJson) + ")", bridgeUrl, 0);
                 dispatched++;
@@ -275,6 +303,9 @@ final class McefBridge {
             byte[] body = encoded == null || encoded.isEmpty()
                     ? new byte[0] : Base64.getDecoder().decode(encoded);
             boolean challenge = WebMapFetcher.isChallenge(status, stringOrNull(result, "c"));
+            if (challenge) RESPONSES_CHALLENGED.incrementAndGet();
+            else if (status > 0) RESPONSES_OK.incrementAndGet();
+            else RESPONSES_FAILED.incrementAndGet();
             if (challenge) {
                 // Sent before the player passed the check: a leftover, not a new ask.
                 if (pending.dispatchedAtMillis >= verifiedAtMillis) {

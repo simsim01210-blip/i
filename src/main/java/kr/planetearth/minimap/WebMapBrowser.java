@@ -3,6 +3,7 @@ package kr.planetearth.minimap;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 
 import java.time.Duration;
 import java.util.Map;
@@ -82,7 +83,7 @@ final class WebMapBrowser {
     }
 
     static void openVerifyScreen() {
-        if (!MCEF_PRESENT || !McefBridge.isAvailable()) return;
+        if (!canVerify()) return;
         McefBridge.openVerifyScreen();
     }
 
@@ -98,11 +99,50 @@ final class WebMapBrowser {
         return PlanetEarthMinimapClient.fullMapKey.getBoundKeyLocalizedText().getString();
     }
 
+    /** Whether the player can open the verification window right now — offered as
+     *  soon as the block is seen, not only once a browser request has hit the check,
+     *  so the button is there even if those requests never come back at all. */
+    static boolean canVerify() {
+        return MCEF_PRESENT && challengeSeen && McefBridge.isAvailable();
+    }
+
+    private static final long JOIN_NOTICE_DELAY_MILLIS = 4_000L;
+    private static final long JOIN_NOTICE_WINDOW_MILLIS = 30_000L;
+    private static long joinedAtMillis;
+
+    static void onJoin() {
+        joinedAtMillis = System.currentTimeMillis();
+    }
+
+    /** Client tick: once per join, a highlighted chat line explaining the block and
+     *  how to verify — sent as soon as the block is detected (it takes the first map
+     *  request after joining to find out), and not at all if the map just works. */
+    static void tickJoinNotice(MinecraftClient client) {
+        if (joinedAtMillis == 0L || client.player == null) return;
+        long sinceJoin = System.currentTimeMillis() - joinedAtMillis;
+        if (sinceJoin < JOIN_NOTICE_DELAY_MILLIS) return;
+        if (sinceJoin > JOIN_NOTICE_WINDOW_MILLIS) {
+            joinedAtMillis = 0L;
+            return;
+        }
+        if (!challengeSeen) return;
+        joinedAtMillis = 0L;
+        if (MCEF_PRESENT) {
+            announce("웹지도가 Cloudflare 인증으로 막혀 있어요. " + fullMapKeyName()
+                    + " 키로 전체 지도를 열고 '웹지도 인증' 버튼을 눌러 인증해주세요.");
+        } else {
+            announce("웹지도가 Cloudflare 인증으로 막혀 있어요. MCEF 모드가 있어야 "
+                    + "게임 안에서 인증하고 지도를 볼 수 있습니다.");
+        }
+    }
+
     private static void announce(String message) {
         MinecraftClient client = MinecraftClient.getInstance();
         client.execute(() -> {
             if (client.player != null) {
-                client.player.sendMessage(Text.literal("[PlanetMap] " + message), false);
+                client.player.sendMessage(Text.literal("[PlanetMap] ")
+                        .formatted(Formatting.GOLD, Formatting.BOLD)
+                        .append(Text.literal(message).formatted(Formatting.YELLOW)), false);
             }
         });
     }
