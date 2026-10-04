@@ -95,10 +95,26 @@ final class McefBridge {
     private static long bridgeRetryAt;
     private static volatile CefBrowser verifyBrowser;
     private static volatile Runnable verifyPassed;
+    // When the player last got past the check. Requests the page had already sent
+    // before that still come back with the check page afterwards — those must not
+    // flag "인증 필요" again, or passing it just made the prompt come right back.
+    private static volatile long verifiedAtMillis;
+    private static volatile boolean loggedChallengeSinceVerify;
 
     private McefBridge() {}
 
-    private record Pending(String url, String headersJson, CompletableFuture<WebMapFetcher.Response> future) {}
+    private static final class Pending {
+        private final String url;
+        private final String headersJson;
+        private final CompletableFuture<WebMapFetcher.Response> future;
+        private volatile long dispatchedAtMillis;
+
+        private Pending(String url, String headersJson, CompletableFuture<WebMapFetcher.Response> future) {
+            this.url = url;
+            this.headersJson = headersJson;
+            this.future = future;
+        }
+    }
 
     static boolean isAvailable() {
         try {
@@ -139,6 +155,7 @@ final class McefBridge {
             while (dispatched < MAX_DISPATCH_PER_FRAME && (id = QUEUE.poll()) != null) {
                 Pending pending = PENDING.get(id);
                 if (pending == null) continue;
+                pending.dispatchedAtMillis = System.currentTimeMillis();
                 bridge.executeJavaScript("window.__planetmap&&window.__planetmap.run(" + id + ","
                         + jsString(pending.url) + "," + jsString(pending.headersJson) + ")", bridgeUrl, 0);
                 dispatched++;
@@ -212,8 +229,10 @@ final class McefBridge {
                     if (httpStatusCode == 200) {
                         browser.executeJavaScript(BRIDGE_SCRIPT, bridgeUrl, 0);
                         bridgeReady = true;
+                        PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 연결 페이지 준비됨");
                     } else {
                         bridgeReady = false;
+                        PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 연결 페이지 응답 {}", httpStatusCode);
                         // The page itself was put behind the check: no fetch will ever
                         // report it, so ask the player from here. pump() reloads it
                         // every few seconds, which picks up the cookie once they pass.
@@ -221,7 +240,16 @@ final class McefBridge {
                             WebMapBrowser.onBrowserChallenge();
                         }
                     }
-                } else if (browser == verifyBrowser && httpStatusCode == 200) {
+                } else if (browser == verifyBrowser) {
+                    String url = frame.getURL();
+                    PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 인증 창 페이지 응답 {} ({})",
+                            httpStatusCode, url);
+                    // Only the data page itself answering normally counts — not some
+                    // intermediate page of the check flow that happens to return 200.
+                    if (httpStatusCode != 200 || url == null || url.contains("/cdn-cgi/")
+                            || !url.contains("/up/world/")) return;
+                    verifiedAtMillis = System.currentTimeMillis();
+                    loggedChallengeSinceVerify = false;
                     Runnable passed = verifyPassed;
                     if (passed != null) passed.run();
                 }
@@ -247,7 +275,17 @@ final class McefBridge {
                     ? new byte[0] : Base64.getDecoder().decode(encoded);
             boolean challenge = WebMapFetcher.isChallenge(status, stringOrNull(result, "c"));
             if (challenge) {
-                WebMapBrowser.onBrowserChallenge();
+                // Sent before the player passed the check: a leftover, not a new ask.
+                if (pending.dispatchedAtMillis >= verifiedAtMillis) {
+                    if (!loggedChallengeSinceVerify) {
+                        loggedChallengeSinceVerify = true;
+                        PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 요청이 확인 페이지로 막힘 "
+                                + "(마지막 인증 후 {}ms): {}",
+                                verifiedAtMillis == 0L ? -1 : System.currentTimeMillis() - verifiedAtMillis,
+                                pending.url);
+                    }
+                    WebMapBrowser.onBrowserChallenge();
+                }
             } else if (status > 0) {
                 WebMapBrowser.onBrowserSuccess();
             }

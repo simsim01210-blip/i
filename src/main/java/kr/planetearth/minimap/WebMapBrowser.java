@@ -60,6 +60,9 @@ final class WebMapBrowser {
 
     /** The browser itself was shown the check: only the player can get past it. */
     static void onBrowserChallenge() {
+        if (!verificationNeeded) {
+            PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 인증 필요 상태로 전환");
+        }
         verificationNeeded = true;
         if (!announcedVerification) {
             announcedVerification = true;
@@ -72,6 +75,7 @@ final class WebMapBrowser {
     static void onBrowserSuccess() {
         if (!verificationNeeded) return;
         verificationNeeded = false;
+        PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 인증 통과 — 지도를 다시 불러옵니다");
         announcedVerification = false;
         LiveAtlasTileManager.onWebMapRecovered();
     }
