@@ -564,7 +564,7 @@ public final class MinimapHud {
             }
         }
 
-        if (webMapDown) {
+        if (showWebMapNotice()) {
             drawWebMapDownNotice(context, clampedX, clampedY, width, height);
         }
 
@@ -732,8 +732,22 @@ public final class MinimapHud {
     }
 
     private static final Text WEB_MAP_DOWN_TEXT = Text.literal("웹지도 연결이 원활하지 않습니다");
+    private static final Text WEB_MAP_VERIFY_TEXT = Text.literal("웹지도 인증이 필요합니다 (N → 웹지도 인증)");
+    private static final Text WEB_MAP_NEEDS_MCEF_TEXT = Text.literal("웹지도가 인증으로 막힘 · MCEF 모드 필요");
     private static List<net.minecraft.text.OrderedText> webMapDownLines = List.of();
     private static int webMapDownLinesWidth = -1;
+    private static Text webMapDownLinesText;
+
+    /** Whether the connection notice should be up at all. */
+    static boolean showWebMapNotice() {
+        return WebMapHealth.isDown() || WebMapBrowser.verificationNeeded();
+    }
+
+    private static Text webMapNoticeText() {
+        if (WebMapBrowser.verificationNeeded()) return WEB_MAP_VERIFY_TEXT;
+        if (WebMapBrowser.challengeSeen() && !WebMapBrowser.mcefInstalled()) return WEB_MAP_NEEDS_MCEF_TEXT;
+        return WEB_MAP_DOWN_TEXT;
+    }
 
     /** Shown over the (still drawn, last cached) map while {@link WebMapHealth} judges
      *  the web map down. Wrapped to the map's width so it also fits the small minimap;
@@ -742,9 +756,11 @@ public final class MinimapHud {
     static void drawWebMapDownNotice(DrawContext context, int mapX, int mapY, int width, int height) {
         MinecraftClient client = MinecraftClient.getInstance();
         int maxTextWidth = Math.max(40, width - 16);
-        if (maxTextWidth != webMapDownLinesWidth) {
-            webMapDownLines = client.textRenderer.wrapLines(WEB_MAP_DOWN_TEXT, maxTextWidth);
+        Text noticeText = webMapNoticeText();
+        if (maxTextWidth != webMapDownLinesWidth || noticeText != webMapDownLinesText) {
+            webMapDownLines = client.textRenderer.wrapLines(noticeText, maxTextWidth);
             webMapDownLinesWidth = maxTextWidth;
+            webMapDownLinesText = noticeText;
         }
         int fontHeight = client.textRenderer.fontHeight;
         int lineHeight = fontHeight + 1;

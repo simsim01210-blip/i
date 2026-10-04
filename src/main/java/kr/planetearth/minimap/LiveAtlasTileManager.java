@@ -370,16 +370,9 @@ public final class LiveAtlasTileManager {
             String base = PlanetEarthMinimapClient.config.mapBaseUrl();
             String url = base + "/tiles/" + key.world + "/" + path
                     + (version > 0 ? "?timestamp=" + version : "");
-            HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(url))
-                    .timeout(Duration.ofSeconds(12))
-                    .header("User-Agent", "PlanetEarthMinimap/0.1")
-                    .header("Referer", base + "/")
-                    .GET()
-                    .build();
-            (highPriority ? PRIORITY_HTTP : HTTP)
-                    .sendAsync(httpRequest, HttpResponse.BodyHandlers.ofByteArray())
+            WebMapFetcher.fetch(highPriority ? PRIORITY_HTTP : HTTP, url, Duration.ofSeconds(12), null)
                     .thenApplyAsync(response -> {
-                        int status = response.statusCode();
+                        int status = response.status();
                         if (status != 200 && status != 404) {
                             // 5xx / 429 / Cloudflare challenge...: the server is having
                             // trouble, which says nothing about whether this tile exists.

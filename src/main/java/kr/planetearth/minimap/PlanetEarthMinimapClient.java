@@ -58,6 +58,9 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
         // log it and skip that one frame/tick/scroll instead of taking the game down.
         HudRenderCallback.EVENT.register((context, ignoredTickCounter) -> {
             try {
+                // Hands queued web map requests to the in-game browser when that
+                // route is in use; a no-op otherwise (see WebMapBrowser).
+                WebMapBrowser.pump();
                 MinimapHud.render(context);
             } catch (Throwable error) {
                 LOGGER.error("미니맵 렌더링 중 오류가 발생해 이번 프레임을 건너뜁니다", error);
@@ -74,6 +77,8 @@ public final class PlanetEarthMinimapClient implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             try {
+                // Also from the tick: with F1 on the HUD callback above never runs.
+                WebMapBrowser.pump();
                 NavigationManager.tick(client);
                 while (editKey.wasPressed()) {
                     MinimapEditorScreen.playOpenCloseSound();

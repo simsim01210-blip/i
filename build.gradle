@@ -26,6 +26,9 @@ sourceSets {
 
 repositories {
     mavenCentral()
+    // MCEF (in-game Chromium) is an optional dependency: compiled against, never
+    // bundled. Only used when the player has the MCEF mod installed.
+    maven { url = uri("https://mcef-download.cinemamod.com/repositories/releases") }
 }
 
 dependencies {
@@ -33,6 +36,7 @@ dependencies {
     mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    modCompileOnly "com.cinemamod:mcef:2.1.6-${project.minecraft_version}"
 
     implementation include("com.twelvemonkeys.imageio:imageio-webp:3.10.1")
     implementation include("com.twelvemonkeys.imageio:imageio-core:3.10.1")

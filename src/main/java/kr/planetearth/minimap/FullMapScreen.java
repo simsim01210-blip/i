@@ -60,6 +60,7 @@ abstract class FullMapScreenBase extends Screen {
     private int waypointHeadingY;
     private ButtonWidget playerButton;
     private ButtonWidget playerSearchButton;
+    private ButtonWidget verifyButton;
     private String openedCategory;
     private boolean playerBrowserOpen;
     private int markerScroll;
@@ -124,6 +125,12 @@ abstract class FullMapScreenBase extends Screen {
         MinimapConfig config = PlanetEarthMinimapClient.config;
         int panelX = width - SIDEBAR_WIDTH + 8;
         int controlWidth = SIDEBAR_WIDTH - 16;
+        // Sits on the map just under the connection notice; only shown (see
+        // renderUnsafe) while the web map's Cloudflare check is waiting on the player.
+        verifyButton = addDrawableChild(ButtonWidget.builder(Text.literal("웹지도 인증"),
+                pressed -> WebMapBrowser.openVerifyScreen())
+                .dimensions(mapWidth() / 2 - 60, height / 4 + 14, 120, 20).build());
+        verifyButton.visible = WebMapBrowser.verificationNeeded();
         if (playerBrowserOpen) {
             rebuildPlayerBrowser(panelX, controlWidth);
             return;
@@ -621,9 +628,10 @@ abstract class FullMapScreenBase extends Screen {
                 centerWorldX, centerWorldZ, pixelsPerBlock());
         drawLocalPlayer(context, mapWidth);
         drawPendingWaypoint(context, mapWidth);
-        if (WebMapHealth.isDown()) {
+        if (MinimapHud.showWebMapNotice()) {
             MinimapHud.drawWebMapDownNotice(context, 0, 0, mapWidth, height);
         }
+        if (verifyButton != null) verifyButton.visible = WebMapBrowser.verificationNeeded();
 
         context.fill(mapWidth, 0, width, height, 0xF0181818);
         context.fill(mapWidth, 0, mapWidth + 2, height, 0xFF8B8B8B);

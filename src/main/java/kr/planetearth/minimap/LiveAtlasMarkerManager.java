@@ -1004,21 +1004,21 @@ public final class LiveAtlasMarkerManager {
             markerPayloadSignature = Long.MIN_VALUE;
         }
         String base = PlanetEarthMinimapClient.config.mapBaseUrl();
-        HttpRequest.Builder builder = requestBuilder(base + "/tiles/_markers_/marker_" + world + ".json");
         String etag = markerEtag;
         String lastModified = markerLastModified;
-        if (etag != null && !etag.isBlank()) builder.header("If-None-Match", etag);
+        Map<String, String> conditional = new java.util.HashMap<>();
+        if (etag != null && !etag.isBlank()) conditional.put("If-None-Match", etag);
         if (lastModified != null && !lastModified.isBlank()) {
-            builder.header("If-Modified-Since", lastModified);
+            conditional.put("If-Modified-Since", lastModified);
         }
-        HTTP.sendAsync(builder.GET().build(), HttpResponse.BodyHandlers.ofString())
+        WebMapFetcher.fetch(HTTP, base + "/tiles/_markers_/marker_" + world + ".json",
+                        Duration.ofSeconds(20), conditional)
                 .thenAccept(response -> {
-                    if (response.statusCode() == 304) return;
-                    if (response.statusCode() != 200) return;
-                    response.headers().firstValue("ETag").ifPresent(value -> markerEtag = value);
-                    response.headers().firstValue("Last-Modified")
-                            .ifPresent(value -> markerLastModified = value);
-                    String body = response.body();
+                    if (response.status() == 304) return;
+                    if (response.status() != 200) return;
+                    if (response.etag() != null) markerEtag = response.etag();
+                    if (response.lastModified() != null) markerLastModified = response.lastModified();
+                    String body = response.text();
                     long signature = ((long) body.length() << 32)
                             ^ (body.hashCode() & 0xFFFFFFFFL);
                     if (signature == markerPayloadSignature && !markerData.isEmpty()) return;
@@ -1088,10 +1088,10 @@ public final class LiveAtlasMarkerManager {
             return;
         }
         String base = PlanetEarthMinimapClient.config.mapBaseUrl();
-        HTTP.sendAsync(request(base + "/tiles/_markers_/" + iconName + ".png"),
-                        HttpResponse.BodyHandlers.ofByteArray())
+        WebMapFetcher.fetch(HTTP, base + "/tiles/_markers_/" + iconName + ".png",
+                        Duration.ofSeconds(20), null)
                 .thenAccept(response -> {
-                    if (response.statusCode() != 200) {
+                    if (response.status() != 200) {
                         ICON_PENDING.remove(iconName);
                         return;
                     }
@@ -1127,18 +1127,6 @@ public final class LiveAtlasMarkerManager {
         } finally {
             ICON_PENDING.remove(iconName);
         }
-    }
-
-    private static HttpRequest request(String url) {
-        return requestBuilder(url).GET().build();
-    }
-
-    private static HttpRequest.Builder requestBuilder(String url) {
-        String base = PlanetEarthMinimapClient.config.mapBaseUrl();
-        return HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(20))
-                .header("User-Agent", "PlanetEarthMinimap/0.8")
-                .header("Referer", base + "/");
     }
 
     private static double[] toDoubleArray(com.google.gson.JsonArray array) {

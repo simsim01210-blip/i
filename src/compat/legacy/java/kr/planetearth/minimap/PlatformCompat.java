@@ -134,6 +134,30 @@ final class PlatformCompat {
         }
     }
 
+    /** Draws a raw OpenGL texture (one not registered with the TextureManager, e.g.
+     *  the in-game browser's page) as a plain rectangle. */
+    static void drawGlTexture(DrawContext context, int textureId, int x, int y, int width, int height) {
+        if (textureId <= 0 || width <= 0 || height <= 0) return;
+        context.draw();
+        boolean blendBefore = blendWasEnabled();
+        RenderSystem.disableBlend();
+        try {
+            RenderSystem.setShader(GameRenderer::getPositionTexColorProgram);
+            RenderSystem.setShaderTexture(0, textureId);
+            Matrix4f matrix = context.getMatrices().peek().getPositionMatrix();
+            BufferBuilder builder = Tessellator.getInstance().getBuffer();
+            builder.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_TEXTURE_COLOR);
+            builder.vertex(matrix, x, y + height, 0f).texture(0f, 1f).color(255, 255, 255, 255).next();
+            builder.vertex(matrix, x + width, y + height, 0f).texture(1f, 1f).color(255, 255, 255, 255).next();
+            builder.vertex(matrix, x + width, y, 0f).texture(1f, 0f).color(255, 255, 255, 255).next();
+            builder.vertex(matrix, x, y, 0f).texture(0f, 0f).color(255, 255, 255, 255).next();
+            BufferRenderer.drawWithGlobalProgram(builder.end());
+        } finally {
+            RenderSystem.setShaderTexture(0, 0);
+            restoreBlend(blendBefore);
+        }
+    }
+
     private static void addFramebufferVertex(BufferBuilder builder, Matrix4f matrix,
                                              float x, float y,
                                              int scaledWidth, int scaledHeight) {

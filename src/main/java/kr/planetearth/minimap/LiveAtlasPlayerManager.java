@@ -248,15 +248,9 @@ public final class LiveAtlasPlayerManager {
         if (account == null || account.isBlank() || !FACE_PENDING.add(key)) return;
         String base = PlanetEarthMinimapClient.config.mapBaseUrl();
         String url = base + "/tiles/faces/16x16/" + account + ".png";
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(12))
-                .header("User-Agent", "PlanetEarthMinimap/0.1")
-                .header("Referer", base + "/")
-                .GET()
-                .build();
-        HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+        WebMapFetcher.fetch(HTTP, url, Duration.ofSeconds(12), null)
                 .thenAccept(response -> {
-                    if (response.statusCode() != 200) {
+                    if (response.status() != 200) {
                         FACE_PENDING.remove(key);
                         return;
                     }
@@ -338,20 +332,14 @@ public final class LiveAtlasPlayerManager {
         }
         String base = PlanetEarthMinimapClient.config.mapBaseUrl();
         String url = base + "/up/world/" + world + "/" + now;
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(8))
-                .header("User-Agent", "PlanetEarthMinimap/0.1")
-                .header("Referer", base + "/")
-                .GET()
-                .build();
         WebMapHealth.feedRequestStarted();
-        HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        WebMapFetcher.fetch(HTTP, url, Duration.ofSeconds(8), null)
                 .thenAccept(response -> {
-                    if (response.statusCode() != 200) {
+                    if (response.status() != 200) {
                         WebMapHealth.recordFailure();
                         return;
                     }
-                    JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
+                    JsonObject root = JsonParser.parseString(response.text()).getAsJsonObject();
                     List<WebPlayer> updated = new ArrayList<>();
                     for (JsonElement element : root.getAsJsonArray("players")) {
                         JsonObject object = element.getAsJsonObject();
