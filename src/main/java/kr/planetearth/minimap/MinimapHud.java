@@ -732,7 +732,8 @@ public final class MinimapHud {
     }
 
     private static final Text WEB_MAP_DOWN_TEXT = Text.literal("웹지도 연결이 원활하지 않습니다");
-    private static final Text WEB_MAP_VERIFY_TEXT = Text.literal("웹지도 인증이 필요합니다 (N → 웹지도 인증)");
+    private static Text webMapVerifyText;
+    private static String webMapVerifyKey;
     private static final Text WEB_MAP_NEEDS_MCEF_TEXT = Text.literal("웹지도가 인증으로 막힘 · MCEF 모드 필요");
     private static List<net.minecraft.text.OrderedText> webMapDownLines = List.of();
     private static int webMapDownLinesWidth = -1;
@@ -744,7 +745,16 @@ public final class MinimapHud {
     }
 
     private static Text webMapNoticeText() {
-        if (WebMapBrowser.verificationNeeded()) return WEB_MAP_VERIFY_TEXT;
+        if (WebMapBrowser.verificationNeeded()) {
+            // Names the key the player actually bound; rebuilt only when it changes so
+            // the wrapped-lines cache (keyed on this Text instance) keeps hitting.
+            String key = WebMapBrowser.fullMapKeyName();
+            if (webMapVerifyText == null || !key.equals(webMapVerifyKey)) {
+                webMapVerifyKey = key;
+                webMapVerifyText = Text.literal("웹지도 인증이 필요합니다 (" + key + " → 웹지도 인증)");
+            }
+            return webMapVerifyText;
+        }
         if (WebMapBrowser.challengeSeen() && !WebMapBrowser.mcefInstalled()) return WEB_MAP_NEEDS_MCEF_TEXT;
         return WEB_MAP_DOWN_TEXT;
     }

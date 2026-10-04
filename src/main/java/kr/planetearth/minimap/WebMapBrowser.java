@@ -66,7 +66,8 @@ final class WebMapBrowser {
         verificationNeeded = true;
         if (!announcedVerification) {
             announcedVerification = true;
-            announce("웹지도 인증이 필요해요. N키로 전체 지도를 열고 '웹지도 인증' 버튼을 눌러주세요.");
+            announce("웹지도 인증이 필요해요. " + fullMapKeyName()
+                    + " 키로 전체 지도를 열고 '웹지도 인증' 버튼을 눌러주세요.");
         }
     }
 
@@ -89,6 +90,12 @@ final class WebMapBrowser {
     static void pump() {
         if (!MCEF_PRESENT || !challengeSeen) return;
         McefBridge.pump();
+    }
+
+    /** Whatever key the player actually bound the full map to (N by default). */
+    static String fullMapKeyName() {
+        if (PlanetEarthMinimapClient.fullMapKey == null) return "N";
+        return PlanetEarthMinimapClient.fullMapKey.getBoundKeyLocalizedText().getString();
     }
 
     private static void announce(String message) {

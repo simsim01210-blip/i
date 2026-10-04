@@ -244,6 +244,7 @@ final class McefBridge {
                     String url = frame.getURL();
                     PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 인증 창 페이지 응답 {} ({})",
                             httpStatusCode, url);
+                    logCookieNames(url);
                     // Only the data page itself answering normally counts — not some
                     // intermediate page of the check flow that happens to return 200.
                     if (httpStatusCode != 200 || url == null || url.contains("/cdn-cgi/")
@@ -287,6 +288,10 @@ final class McefBridge {
                     WebMapBrowser.onBrowserChallenge();
                 }
             } else if (status > 0) {
+                if (WebMapBrowser.verificationNeeded()) {
+                    PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 확인 없이 응답 {}: {}",
+                            status, pending.url);
+                }
                 WebMapBrowser.onBrowserSuccess();
             }
             if (status == 0) {
@@ -298,6 +303,28 @@ final class McefBridge {
                     stringOrNull(result, "e"), stringOrNull(result, "m"), challenge));
         } catch (Throwable error) {
             PlanetEarthMinimapClient.LOGGER.debug("브라우저 응답을 해석하지 못했습니다", error);
+        }
+    }
+
+    /** Diagnostics only: which cookies (by name — values are never read or logged)
+     *  the browser holds for the map site. Tells apart "the check's cookie never got
+     *  stored" from "it's stored, but the site keeps asking anyway". */
+    private static void logCookieNames(String url) {
+        try {
+            java.util.List<String> names = new java.util.ArrayList<>();
+            // The visitor is never called when there are no cookies at all, so a
+            // missing "저장된 쿠키 이름" line right after this one means none.
+            PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 쿠키 조회");
+            org.cef.network.CefCookieManager.getGlobalManager().visitUrlCookies(url, true,
+                    (cookie, count, total, delete) -> {
+                        names.add(cookie.name);
+                        if (count + 1 >= total) {
+                            PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 저장된 쿠키 이름: {}", names);
+                        }
+                        return true;
+                    });
+        } catch (Throwable error) {
+            PlanetEarthMinimapClient.LOGGER.info("[웹지도 브라우저] 쿠키 확인 실패: {}", error.toString());
         }
     }
 
